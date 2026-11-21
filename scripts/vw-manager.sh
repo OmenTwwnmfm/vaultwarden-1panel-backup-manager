@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION="1.3.0"
+VERSION="1.3.1"
 CONFIG_FILE="/etc/vaultwarden-backup.conf"
 BACKUP_SCRIPT="/usr/local/sbin/vw-backup.sh"
 RESTORE_SCRIPT="/usr/local/sbin/vw-restore-prepare.sh"
@@ -1070,8 +1070,35 @@ configure_backup_policy() {
 }
 
 generate_diagnostics() {
-  [[ -x /usr/local/sbin/vw-diagnose.sh ]] || { err "诊断脚本未安装，请先运行菜单 7 更新后台脚本。"; return 1; }
-  /usr/local/sbin/vw-diagnose.sh
+  local diagnostic_script="" report_dir="${VW_DIAG_REPORT_DIR:-/var/log/vaultwarden-backup-diagnostics}" latest_report=""
+  # Prefer the diagnostic script shipped with the source checkout. This lets
+  # users test the current project copy even before installing/updating helpers.
+  if [[ -f "$SCRIPT_DIR/vw-diagnose.sh" ]]; then
+    diagnostic_script="$SCRIPT_DIR/vw-diagnose.sh"
+  elif [[ -f /usr/local/sbin/vw-diagnose.sh ]]; then
+    diagnostic_script="/usr/local/sbin/vw-diagnose.sh"
+  else
+    err "找不到诊断脚本。请从完整项目目录运行，或先选择菜单 7 更新后台脚本。"
+    return 1
+  fi
+
+  echo "========== 系统诊断报告 =========="
+  echo "诊断脚本：$diagnostic_script"
+  echo "报告目录：$report_dir"
+  echo "报告会省略配置中的密码、Token 和私钥内容。"
+  if ! bash "$diagnostic_script"; then
+    err "诊断脚本执行失败。请检查上方错误信息。"
+    return 1
+  fi
+  latest_report=$(find "$report_dir" -maxdepth 1 -type f -name 'diagnosis-*.txt' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)
+  if [[ -n "$latest_report" && -s "$latest_report" ]]; then
+    chmod 600 "$latest_report" 2>/dev/null || true
+    ok "诊断报告已生成：$latest_report"
+    ls -lh -- "$latest_report"
+  else
+    err "脚本未生成诊断报告。请检查目录权限：$report_dir"
+    return 1
+  fi
   pause
 }
 
@@ -1206,47 +1233,58 @@ main_menu() {
   while true; do
     clear 2>/dev/null || true
     cat <<EOF
-============================================================
- Vaultwarden 1Panel 备份与灾难恢复管理器  v${VERSION}
-============================================================
-1Panel 负责应用、Docker、HTTPS；本工具负责数据保护与恢复。
-自动备份使用 systemd timer，不依赖 1Panel 计划任务。
-
-  [01] 首次配置 / 重新检测容器与数据目录
-  [02] 立即备份当前数据并推送 GitHub
-  [03] 从 GitHub 选择备份并恢复数据
-  [04] 检查当前环境和备份配置
-  [05] 查看最近备份日志
-  [06] 查看自动备份定时任务帮助
-  [07] 更新已安装的后台脚本（保留现有配置）
-  [08] 验证 GitHub 历史备份（SHA256 / age / SQLite）
-
-  [09] 安装 systemd 自动备份 / 修改执行时间
-  [10] 查看 systemd 定时任务状态
-  [11] 暂停自动备份
-  [12] 恢复自动备份
-  [13] 配置通知（Telegram / ntfy / Webhook）并发送测试
-  [14] Vaultwarden 更新前自动备份保护
-  [15] 生成系统诊断报告
-  [16] 历史备份管理（查看 / 永久保留 / 取消保留 / 删除）
-  [17] 查看加密部署清单
-  [18] 隔离恢复演练（临时容器启动，不连接生产网络、不修改生产数据）
-  [19] 配置备份策略（保留天数 / 磁盘阈值 / 推送重试）
-
-  [0] 退出
-============================================================
+╭──────────────────────────────────────────────────────────────────────╮
+│                         Vaultwarden Manager                          │
+│                 v${VERSION} · 1Panel Edition · Ubuntu / Debian                 │
+│                                                                      │
+│  1Panel 负责应用、Docker、HTTPS；本工具负责数据保护与恢复。           │
+│  自动备份使用 systemd timer，不依赖 1Panel 计划任务。                 │
+├──────────────────────────────────────────────────────────────────────┤
+│  01 · 环境管理                                                       │
+│      [01] 首次配置 / 重新检测容器与数据目录                           │
+│      [02] 立即备份当前数据并推送 GitHub                               │
+│      [03] 从 GitHub 选择备份并恢复数据                               │
+│      [04] 检查当前环境和备份配置                                     │
+├──────────────────────────────────────────────────────────────────────┤
+│  02 · 备份管理                                                       │
+│      [05] 查看最近备份日志                                           │
+│      [06] 查看自动备份定时任务帮助                                   │
+│      [07] 更新已安装的后台脚本（保留现有配置）                       │
+│      [08] 验证 GitHub 历史备份（SHA256 / age / SQLite）               │
+├──────────────────────────────────────────────────────────────────────┤
+│  03 · 自动化管理                                                     │
+│      [09] 安装 systemd 自动备份 / 修改执行时间                       │
+│      [10] 查看 systemd 定时任务状态                                 │
+│      [11] 暂停自动备份                                               │
+│      [12] 恢复自动备份                                               │
+├──────────────────────────────────────────────────────────────────────┤
+│  04 · 安全与诊断                                                     │
+│      [13] 配置通知（Telegram / ntfy / Webhook）并发送测试             │
+│      [14] Vaultwarden 更新前自动备份保护                             │
+│      [15] 生成系统诊断报告                                           │
+├──────────────────────────────────────────────────────────────────────┤
+│  05 · 历史与恢复                                                     │
+│      [16] 历史备份管理（查看 / 永久保留 / 取消保留 / 删除）           │
+│      [17] 查看加密部署清单                                           │
+│      [18] 隔离恢复演练（不连接生产网络、不修改生产数据）             │
+├──────────────────────────────────────────────────────────────────────┤
+│  06 · 策略设置                                                       │
+│      [19] 配置备份策略（保留天数 / 磁盘阈值 / 推送重试）             │
+├──────────────────────────────────────────────────────────────────────┤
+│      [00] 退出                                                       │
+╰──────────────────────────────────────────────────────────────────────╯
 EOF
-    read -r -p "请选择操作 [0-19]: " choice || exit 0
+    read -r -p "请选择操作 [00-19]: " choice || exit 0
     case "$choice" in
-      1) configure_wizard || pause ;;
-      2) run_backup_now || true ;;
-      3) restore_from_github || pause ;;
-      4) check_configuration || pause ;;
-      5) show_logs ;;
-      6) show_schedule_help ;;
-      7) update_installed_scripts || pause ;;
-      8) verify_github_backup || pause ;;
-      9) install_systemd_timer || pause ;;
+      1|01) configure_wizard || pause ;;
+      2|02) run_backup_now || true ;;
+      3|03) restore_from_github || pause ;;
+      4|04) check_configuration || pause ;;
+      5|05) show_logs ;;
+      6|06) show_schedule_help ;;
+      7|07) update_installed_scripts || pause ;;
+      8|08) verify_github_backup || pause ;;
+      9|09) install_systemd_timer || pause ;;
       10) systemd_timer_status ;;
       11) pause_systemd_timer || pause ;;
       12) resume_systemd_timer || pause ;;
@@ -1257,8 +1295,8 @@ EOF
       17) view_deployment_manifest || pause ;;
       18) restore_rehearsal || pause ;;
       19) configure_backup_policy || pause ;;
-      0) echo "已退出。"; exit 0 ;;
-      *) warn "无效选项。"; sleep 1 ;;
+      0|00) echo "已退出。"; exit 0 ;;
+      *) warn "无效选项，请输入 00-19。"; sleep 1 ;;
     esac
   done
 }

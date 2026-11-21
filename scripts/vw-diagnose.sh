@@ -3,12 +3,17 @@ set -Eeuo pipefail
 umask 077
 CONFIG_FILE="${VW_CONFIG_FILE:-/etc/vaultwarden-backup.conf}"
 COMMON_LIB="${VW_COMMON_LIB:-/usr/local/libexec/vw-common.sh}"
-REPORT_DIR="/var/log/vaultwarden-backup-diagnostics"
-mkdir -p "$REPORT_DIR"; chmod 700 "$REPORT_DIR"
+REPORT_DIR="${VW_DIAG_REPORT_DIR:-/var/log/vaultwarden-backup-diagnostics}"
+mkdir -p "$REPORT_DIR"
+chmod 700 "$REPORT_DIR"
 STAMP=$(date '+%Y%m%d-%H%M%S')
-OUT="$REPORT_DIR/diagnosis-$STAMP.txt"
-exec > >(tee "$OUT") 2>&1
+OUT="$REPORT_DIR/diagnosis-${STAMP}-$$.txt"
+# Create and secure the file synchronously before tee starts. Process
+# substitution is asynchronous; chmod immediately after `exec > >(tee ...)`
+# could race with tee creating the file and fail with ENOENT.
+: > "$OUT"
 chmod 600 "$OUT"
+exec > >(tee -a "$OUT") 2>&1
 echo "Vaultwarden Backup Manager diagnostic report"
 echo "Generated: $(date '+%F %T %Z')"
 echo "Host: $(hostname)"

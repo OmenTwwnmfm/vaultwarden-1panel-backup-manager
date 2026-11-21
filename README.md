@@ -10,6 +10,7 @@
 ![Panel](https://img.shields.io/badge/panel-1Panel-1677ff)
 ![Encryption](https://img.shields.io/badge/encryption-age-16a34a)
 ![Scheduler](https://img.shields.io/badge/scheduler-systemd-6d28d9)
+![Version](https://img.shields.io/badge/version-1.3.1-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 </div>
@@ -89,10 +90,11 @@ Vaultwarden_1Panel_GitHub_Project/
 │   ├── vw-restore-prepare.sh        # 校验、解密、暂存及 SQLite 检查
 │   ├── vw-manifest.py               # 生成已脱敏的部署清单
 │   ├── vw-diagnose.sh               # 生成脱敏诊断报告
-│   ├── backup.conf.example          # 配置字段参考
-│   └── README-先阅读.txt
+│   └── backup.conf.example          # 配置字段参考
 └── docs/
-    └── Vaultwarden_1Panel版_交互式备份恢复手册_v5.2.docx
+    ├── 快速开始.md
+    ├── 完整使用手册.md
+    └── 部署信息记录模板.md
 ```
 
 ## 快速开始
@@ -180,28 +182,58 @@ tail -n 100 /var/log/vaultwarden-backup.log
 
 ## 管理器菜单
 
-```text
-01  首次配置 / 重新检测容器与数据目录
-02  立即备份当前数据并推送 GitHub
-03  从 GitHub 选择备份并恢复数据
-04  检查当前环境和备份配置
-05  查看最近备份日志
-06  查看自动备份定时任务帮助
-07  更新已安装的后台脚本（保留现有配置）
-08  验证 GitHub 历史备份（SHA256 / age / SQLite）
-09  安装 systemd 自动备份 / 修改执行时间
-10  查看 systemd 定时任务状态
-11  暂停自动备份
-12  恢复自动备份
-13  配置 Telegram / ntfy / Webhook 通知并测试
-14  Vaultwarden 更新前自动备份保护
-15  生成系统诊断报告
-16  历史备份管理（查看 / 永久保留 / 取消保留 / 删除当前分支文件）
-17  查看加密部署清单
-18  隔离恢复演练（临时容器启动，不连接生产网络、不修改生产数据）
-19  配置保留天数 / 磁盘阈值 / GitHub 推送重试
-0   退出
-```
+菜单按工作流程分组，编号支持输入 `01` 或 `1`（其他两位编号也可以直接输入）：
+
+### 01 · 环境管理
+
+| 编号 | 功能 |
+|---|---|
+| 01 | 首次配置 / 重新检测容器与数据目录 |
+| 02 | 立即备份当前数据并推送 GitHub |
+| 03 | 从 GitHub 选择备份并恢复数据 |
+| 04 | 检查当前环境和备份配置 |
+
+### 02 · 备份管理
+
+| 编号 | 功能 |
+|---|---|
+| 05 | 查看最近备份日志 |
+| 06 | 查看自动备份定时任务帮助 |
+| 07 | 更新已安装的后台脚本（保留现有配置） |
+| 08 | 验证 GitHub 历史备份（SHA256 / age / SQLite） |
+
+### 03 · 自动化管理
+
+| 编号 | 功能 |
+|---|---|
+| 09 | 安装 systemd 自动备份 / 修改执行时间 |
+| 10 | 查看 systemd 定时任务状态 |
+| 11 | 暂停自动备份 |
+| 12 | 恢复自动备份 |
+
+### 04 · 安全与诊断
+
+| 编号 | 功能 |
+|---|---|
+| 13 | 配置通知（Telegram / ntfy / Webhook）并发送测试 |
+| 14 | Vaultwarden 更新前自动备份保护 |
+| 15 | 生成系统诊断报告（保存到 `/var/log/vaultwarden-backup-diagnostics/`） |
+
+### 05 · 历史与恢复
+
+| 编号 | 功能 |
+|---|---|
+| 16 | 历史备份管理（查看 / 永久保留 / 取消保留 / 删除） |
+| 17 | 查看加密部署清单 |
+| 18 | 隔离恢复演练（临时容器启动，不连接生产网络、不修改生产数据） |
+
+### 06 · 策略设置
+
+| 编号 | 功能 |
+|---|---|
+| 19 | 配置备份策略（保留天数 / 磁盘阈值 / 推送重试） |
+
+输入 `00` 或 `0` 退出。详细操作见 [`docs/完整使用手册.md`](docs/完整使用手册.md)。
 
 ## 通知配置
 
@@ -269,6 +301,12 @@ tail -n 100 /var/log/vaultwarden-backup.log
 ## 贡献
 
 欢迎提交 Issue 或 Pull Request。涉及备份、加密、恢复和容器启停的修改，请同时提供：Bash 语法检查、模拟 Docker/Git/age 测试结果，以及对生产数据安全边界的说明。不要在 Issue 中上传真实数据库、加密备份、私钥或日志中的 Token。
+
+## 文档
+
+- [快速开始](docs/快速开始.md)
+- [完整使用手册](docs/完整使用手册.md)
+- [部署信息记录模板](docs/部署信息记录模板.md)
 
 ## License
 

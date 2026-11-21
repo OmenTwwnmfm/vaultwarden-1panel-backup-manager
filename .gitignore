@@ -38,3 +38,6 @@ sends/
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# User-facing project documentation is Markdown only
+*.docx
