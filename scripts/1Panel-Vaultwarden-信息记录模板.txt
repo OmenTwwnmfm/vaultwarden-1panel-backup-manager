@@ -1,0 +1,32 @@
+1Panel / Vaultwarden 部署信息记录表（离线保存）
+================================================
+
+填写日期：
+VPS 提供商：
+Ubuntu / Debian 版本：
+1Panel 版本：
+
+Vaultwarden 应用商店版本：
+Docker 镜像（docker inspect 的 .Config.Image）：
+容器名称（docker ps）：
+容器内数据路径（通常为 /data）：
+主机数据目录（docker inspect 的 Mounts.Source）：
+当前访问域名（完整 https:// 地址）：
+
+1Panel 应用参数（仅记录恢复所需项；不要把真实密钥/密码明文写在普通文件里）：
+DOMAIN：
+SIGNUPS_ALLOWED：
+其他非敏感环境参数：
+是否启用 SMTP：是 / 否
+是否设置 ADMIN_TOKEN：是 / 否（不要在此写明文 Token）
+
+GitHub 仓库：
+GitHub Deploy Key 名称：
+age 公钥（age1...）：
+age 私钥离线存储位置（不要记录私钥内容）：
+
+重要：
+1. 本表不要放入 GitHub 仓库。
+2. 不记录 Vaultwarden 用户主密码。
+3. 不记录 GitHub SSH 私钥或 age 私钥内容。
+4. 1Panel 的 Docker 安装、HTTPS/证书和 Vaultwarden 应用本身由 1Panel 管理；新服务器按本文在 1Panel 中安装应用后再恢复 /data。

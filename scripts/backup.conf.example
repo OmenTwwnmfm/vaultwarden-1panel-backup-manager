@@ -1,0 +1,30 @@
+# 复制为 /etc/vaultwarden-backup.conf 后填写真实信息；不要把真实配置上传到 GitHub。
+# CONTAINER：docker ps 输出中的 Vaultwarden 容器名称。
+CONTAINER="1Panel-Vaultwarden-实际容器名"
+
+# DATA_DIR：docker inspect 中 Destination=/data 对应的主机 Source 路径。
+# 绝对不要猜路径，也不要填写容器内部的 /data。
+DATA_DIR="/请替换为实际主机数据目录"
+
+# age 公钥，以 age1 开头；不是 AGE-SECRET-KEY-1 私钥。
+AGE_RECIPIENT="age1替换为你的age公钥"
+
+# GitHub 私有仓库 SSH 地址。创建仓库时保持空仓库，不添加 README。
+GITHUB_REPO="git@github.com:你的GitHub用户名/vaultwarden-backup.git"
+GITHUB_BRANCH="main"
+
+# 专门用于此仓库写入的 SSH 私钥；不要填 .pub 公钥文件。
+GITHUB_SSH_KEY="/root/.ssh/vw_github_backup"
+
+# 本地加密备份和 Git 工作目录。
+BACKUP_DIR="/var/backups/vaultwarden"
+REPO_DIR="/opt/vw-github-repo"
+
+# 本地备份保留天数；Git 当前分支也清理旧文件，但 Git 历史仍会增长。
+RETENTION_DAYS="30"
+
+# GitHub 普通 Git 单文件限制为 100 MB；设为 90 MiB 留出余量。
+MAX_FILE_MIB="90"
+
+# 恢复时 age 私钥文件的默认提示路径（可在交互式恢复时改填 U 盘/SFTP 复制来的路径）。
+AGE_IDENTITY_DEFAULT="/root/vw-age-identity.txt"

@@ -1,0 +1,28 @@
+# Real credentials and local configuration
+/etc/vaultwarden-backup.conf
+vaultwarden-backup.conf
+*.env
+.env
+
+# Private keys / identities
+*age-identity*
+*AGE-SECRET-KEY*
+*.key
+*.pem
+id_ed25519
+id_rsa
+*.pub.key
+
+# Encrypted backup payloads must go to a separate Private backup repository
+*.tar.gz.age
+*.age
+*.age.sha256
+*.sha256
+backups/
+restore-staging/
+
+# Local temporary data
+*.tmp
+*.log
+.DS_Store
+Thumbs.db
