@@ -10,7 +10,7 @@
 ![Panel](https://img.shields.io/badge/panel-1Panel-1677ff)
 ![Encryption](https://img.shields.io/badge/encryption-age-16a34a)
 ![Scheduler](https://img.shields.io/badge/scheduler-systemd-6d28d9)
-![Version](https://img.shields.io/badge/version-1.4.0-blue)
+![Version](https://img.shields.io/badge/version-1.4.1-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 </div>
@@ -38,9 +38,10 @@ Vaultwarden 将用户密码库保存在自己的服务器上，因此需要可�
 
 ### 全局快捷命令
 
-- 完成首次配置（菜单 01）或执行后台脚本更新（菜单 07）后，会安装 `/usr/local/bin/vbm`。
+- 每次通过 `sudo bash ./run.sh` 启动时，启动器都会自动安装或修复 `/usr/local/bin/vbm`；不依赖首次配置向导或手动执行某个菜单。
 - 之后在任意目录执行 `vbm` 即可进入交互式管理菜单；普通用户执行时会通过 sudo 请求管理员权限。
-- `vbm` 指向当初克隆的项目目录，因此更新前先在项目目录 `git pull`，再运行 `vbm` 菜单 07 更新后台脚本。
+- 如果旧版本提示 `vbm: command not found`，进入项目目录执行一次 `sudo bash ./run.sh` 即可触发自修复，然后执行 `hash -r` 再运行 `vbm`。
+- `vbm` 指向当初克隆的项目目录。项目目录不要随意移动或删除。
 
 ### 自动备份与完整性
 
@@ -137,13 +138,7 @@ cd /opt/vaultwarden-1panel-backup-manager
 sudo bash ./run.sh
 ```
 
-完成首次配置（菜单 01）或执行后台脚本更新（菜单 07）后，系统会创建全局命令：
-
-```bash
-vbm
-```
-
-之后无论当前位于哪个目录，都可以执行 `vbm` 进入菜单。
+每次通过 `sudo bash ./run.sh` 启动时，启动器都会自动安装或修复全局命令 `/usr/local/bin/vbm`。之后在 VPS 任意目录执行 `vbm` 即可进入菜单。
 
 本项目源码仓库为 Public，任何人都可以通过 HTTPS 克隆，不需要 GitHub 账号、SSH 密钥或 Token。只有独立的数据备份仓库必须保持 Private。首次配置需要交互式终端，不要通过 systemd 或后台脚本启动配置向导。
 
@@ -343,16 +338,18 @@ tail -n 100 /var/log/vaultwarden-backup.log
 
 性能模块使用 `/var/lib/vaultwarden-backup/performance.tsv` 保存阶段耗时。每次手动或 systemd 备份、交互式恢复会记录总耗时和阶段耗时。菜单 20 可查看摘要、按运行 ID 查看阶段明细，或导出 CSV。性能数据不包含秘密配置值。
 
-## 全局命令 `vbm`
+## License
 
-在首次配置（菜单 01）或菜单 07 更新脚本时，管理器会在 `/usr/local/bin/vbm` 安装一个启动器。此后在任意工作目录执行：
+MIT License。详见仓库中的 `LICENSE`。
+
+## 全局命令 `vbm` 与启动更新检查
+
+通过 `sudo bash ./run.sh` 启动管理器时，程序会自动安装或修复 `/usr/local/bin/vbm`。完成首次配置或后台脚本更新后，也可以在任意目录执行：
 
 ```bash
 vbm
 ```
 
-即可打开交互式菜单。若系统 PATH 不包含 `/usr/local/bin`，请检查 shell 的 PATH；也可以执行 `/usr/local/bin/vbm`。全局命令指向克隆的项目目录，请勿删除该目录。
+如果此前显示 `Command 'vbm' not found`，进入项目目录重新运行 `sudo bash ./run.sh` 即可触发自修复；若 `/usr/local/bin` 不在系统 PATH 中，脚本会在适用时创建 `/usr/bin/vbm` 兼容入口。
 
-## License
-
-MIT License。详见仓库中的 `LICENSE`。
+每次交互式启动时，管理器会通过 Git 获取公开源码仓库的最新提交。发现本地不是最新版本时，会显示远程版本并询问是否更新；只有明确输入 `yes` 才会执行 `git pull --ff-only`，并同步安装新版后台脚本、性能工具和全局启动器。若项目工作区存在未提交修改、远程分支发生分叉或网络检查失败，程序会跳过自动更新，不会强制覆盖本地文件。systemd 定时备份直接调用非交互式备份工作器，不会在凌晨弹出更新确认。菜单 `[21]` 可以手动检查/更新源码。

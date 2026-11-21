@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION="1.4.0"
+VERSION="1.4.1"
 CONFIG_FILE="/etc/vaultwarden-backup.conf"
 BACKUP_SCRIPT="/usr/local/sbin/vw-backup.sh"
 RESTORE_SCRIPT="/usr/local/sbin/vw-restore-prepare.sh"
@@ -331,7 +331,7 @@ write_config() {
 
 install_helper_scripts() {
   local source_dir="$SCRIPT_DIR"
-  [[ -f "$source_dir/vw-common.sh" && -f "$source_dir/vw-backup.sh" && -f "$source_dir/vw-restore-prepare.sh" && -f "$source_dir/vw-manifest.py" && -f "$source_dir/vw-diagnose.sh" && -f "$source_dir/vw-performance.py" && -f "$source_dir/vbm-launcher.sh" ]] || {
+  [[ -f "$source_dir/vw-manager.sh" && -f "$source_dir/vw-common.sh" && -f "$source_dir/vw-backup.sh" && -f "$source_dir/vw-restore-prepare.sh" && -f "$source_dir/vw-manifest.py" && -f "$source_dir/vw-diagnose.sh" && -f "$source_dir/vw-performance.py" && -f "$source_dir/vbm-launcher.sh" ]] || {
     err "项目脚本不完整，缺少 vw-common.sh / vw-backup.sh / vw-restore-prepare.sh。"
     return 1
   }
@@ -342,7 +342,7 @@ install_helper_scripts() {
   install -o root -g root -m 755 "$source_dir/vw-manifest.py" /usr/local/libexec/vw-manifest.py || return 1
   install -o root -g root -m 700 "$source_dir/vw-diagnose.sh" /usr/local/sbin/vw-diagnose.sh || return 1
   install -o root -g root -m 755 "$source_dir/vw-performance.py" /usr/local/libexec/vw-performance.py || return 1
-  install -o root -g root -m 700 "${BASH_SOURCE[0]}" "$MANAGER_SCRIPT" || return 1
+  install -o root -g root -m 700 "$source_dir/vw-manager.sh" "$MANAGER_SCRIPT" || return 1
   local project_root launcher_tmp
   project_root=$(readlink -f -- "$source_dir/..")
   [[ -f "$project_root/run.sh" ]] || { err "找不到项目 run.sh，无法安装全局命令 vbm。"; return 1; }
@@ -358,6 +358,11 @@ Path(target).write_text(content, encoding="utf-8")
 PYVBM
   install -o root -g root -m 755 "$launcher_tmp" /usr/local/bin/vbm
   rm -f "$launcher_tmp"
+  if [[ ! -x /usr/local/bin/vbm ]]; then err "全局命令 vbm 安装后不可执行。"; return 1; fi
+  case ":${PATH}:" in
+    *:/usr/local/bin:*) ;;
+    *) if [[ ":${PATH}:" == *:/usr/bin:* && ! -e /usr/bin/vbm ]]; then ln -s /usr/local/bin/vbm /usr/bin/vbm; fi ;;
+  esac
   install -d -o root -g root -m 755 /etc/logrotate.d
   install -o root -g root -m 644 "$(dirname "$source_dir")/logrotate-vaultwarden-backup" /etc/logrotate.d/vaultwarden-backup || return 1
   ok "后台脚本已安装/更新："
@@ -1301,57 +1306,149 @@ TXT
   pause
 }
 
+check_for_project_updates() {
+  [[ "${VBM_SKIP_UPDATE_CHECK:-0}" == "1" ]] && return 0
+  local project_root="${VBM_PROJECT_ROOT:-$(readlink -f -- "$SCRIPT_DIR/.." 2>/dev/null || printf '%s' "")}" branch local_head remote_head remote_version dirty answer
+  [[ -n "$project_root" && -d "$project_root/.git" ]] || return 0
+  git -C "$project_root" remote get-url origin >/dev/null 2>&1 || return 0
+  branch=$(git -C "$project_root" branch --show-current 2>/dev/null || true)
+  [[ -n "$branch" ]] || return 0
+  printf '\n正在检查 GitHub 是否有新版...\n'
+  if ! timeout 15s git -C "$project_root" fetch --quiet --no-tags origin "$branch"; then
+    warn "暂时无法检查 GitHub 更新（网络不可用或访问超时）；继续使用本地版本 v${VERSION}。"
+    return 0
+  fi
+  remote_head=$(git -C "$project_root" rev-parse FETCH_HEAD 2>/dev/null || true)
+  local_head=$(git -C "$project_root" rev-parse HEAD 2>/dev/null || true)
+  [[ -n "$remote_head" && -n "$local_head" ]] || return 0
+  if [[ "$remote_head" == "$local_head" ]]; then
+    ok "当前已是最新版本 v${VERSION}。"
+    return 0
+  fi
+  if ! git -C "$project_root" merge-base --is-ancestor "$local_head" "$remote_head" 2>/dev/null; then
+    warn "远程仓库与本地提交不是简单的快进关系，自动更新已跳过。请先手动检查 Git 状态。"
+    return 0
+  fi
+  remote_version=$(git -C "$project_root" show "$remote_head:scripts/vw-manager.sh" 2>/dev/null | sed -n 's/^VERSION="\([^"]*\)"$/\1/p' | head -n 1)
+  remote_version="${remote_version:-未知}"
+  dirty=$(git -C "$project_root" status --porcelain 2>/dev/null || true)
+  echo
+  warn "发现 GitHub 新提交：${local_head:0:8} -> ${remote_head:0:8}（远程版本：v${remote_version}）"
+  if [[ -n "$dirty" ]]; then
+    warn "当前项目目录存在未提交修改，为保护本地文件，不自动更新。请先提交或备份本地修改后再更新。"
+    return 0
+  fi
+  read -r -p "是否现在更新到 GitHub 最新版本？输入 yes 更新 [y/N]: " answer || true
+  if [[ "${answer,,}" != "yes" && "${answer,,}" != "y" ]]; then
+    info "已跳过更新，继续使用当前版本 v${VERSION}。"
+    return 0
+  fi
+  if ! git -C "$project_root" pull --ff-only origin "$branch"; then
+    err "自动更新失败。未执行强制覆盖，请检查网络和 Git 状态。"
+    return 0
+  fi
+  ok "项目源码更新成功。正在同步更新系统后台脚本、性能工具和全局启动器..."
+  if ! install_helper_scripts; then
+    warn "源码已更新，但系统后台脚本安装未全部完成。进入菜单后请运行 [07] 重试更新后台脚本。"
+  else
+    ok "系统后台脚本已同步到最新版本。"
+  fi
+  exec env VBM_SKIP_UPDATE_CHECK=1 VBM_PROJECT_ROOT="$project_root" bash "$project_root/run.sh"
+}
+
+render_main_menu() {
+  python3 - "$VERSION" <<'PYMENU'
+import sys, unicodedata
+version = sys.argv[1]
+W = 82
+
+def width(s):
+    total = 0
+    for ch in s:
+        if unicodedata.combining(ch):
+            continue
+        total += 2 if unicodedata.east_asian_width(ch) in ("F", "W") else 1
+    return total
+
+def pad(s, align="left"):
+    n = W - width(s)
+    if n < 0:
+        s = s[:max(0, len(s)-1)]
+        n = max(0, W-width(s))
+    if align == "center":
+        left = n // 2
+        return " " * left + s + " " * (n-left)
+    return s + " " * n
+
+def row(s="", align="left"):
+    if s and align == "left":
+        s = "  " + s
+    print("│" + pad(s, align) + "│")
+
+def sep():
+    print("├" + "─" * W + "┤")
+
+print("╭" + "─" * W + "╮")
+row("Vaultwarden Manager", "center")
+row(f"v{version} · 1Panel Edition · Ubuntu / Debian", "center")
+row("Powered by OmenTwwnmfm", "center")
+row()
+row("1Panel 负责应用、Docker、HTTPS；本工具负责数据保护与恢复。")
+row("自动备份使用 systemd timer，不依赖 1Panel 计划任务。")
+sep()
+sections = [
+    ("01 · 环境管理", [
+        "[01] 首次配置 / 重新检测容器与数据目录",
+        "[02] 立即备份当前数据并推送 GitHub",
+        "[03] 从 GitHub 选择备份并恢复数据",
+        "[04] 检查当前环境和备份配置"]),
+    ("02 · 备份管理", [
+        "[05] 查看最近备份日志",
+        "[06] 查看自动备份定时任务帮助",
+        "[07] 更新已安装的后台脚本（保留现有配置）",
+        "[08] 验证 GitHub 历史备份（SHA256 / age / SQLite）"]),
+    ("03 · 自动化管理", [
+        "[09] 安装 systemd 自动备份 / 修改执行时间",
+        "[10] 查看 systemd 定时任务状态",
+        "[11] 暂停自动备份",
+        "[12] 恢复自动备份"]),
+    ("04 · 安全与诊断", [
+        "[13] 配置通知（Telegram / ntfy / Webhook）并发送测试",
+        "[14] Vaultwarden 更新前自动备份保护",
+        "[15] 生成系统诊断报告"]),
+    ("05 · 历史与恢复", [
+        "[16] 历史备份管理（查看 / 永久保留 / 取消保留 / 删除）",
+        "[17] 查看加密部署清单",
+        "[18] 隔离恢复演练（不连接生产网络、不修改生产数据）"]),
+    ("06 · 策略设置", [
+        "[19] 配置备份策略（保留天数 / 磁盘阈值 / 推送重试）"]),
+    ("07 · 性能监控", [
+        "[20] 性能监控与执行耗时分析（备份 / 恢复 / GitHub / 校验）"]),
+    ("08 · 项目维护", [
+        "[21] 检查 / 更新项目源码"]),
+]
+for title, items in sections:
+    row(title)
+    for item in items:
+        row("    " + item)
+    sep()
+row("[00] 退出")
+print("╰" + "─" * W + "╯")
+PYMENU
+}
+
 main_menu() {
   require_root
   require_tty
+  if [[ "${VBM_SKIP_UPDATE_CHECK:-0}" == "1" ]]; then
+    unset VBM_SKIP_UPDATE_CHECK
+  else
+    check_for_project_updates
+  fi
   while true; do
     clear 2>/dev/null || true
-    cat <<EOF
-╭──────────────────────────────────────────────────────────────────────╮
-│                         Vaultwarden Manager                          │
-│                 v${VERSION} · 1Panel Edition · Ubuntu / Debian                 │
-│                                                                      │
-│  1Panel 负责应用、Docker、HTTPS；本工具负责数据保护与恢复。           │
-│  自动备份使用 systemd timer，不依赖 1Panel 计划任务。                 │
-├──────────────────────────────────────────────────────────────────────┤
-│  01 · 环境管理                                                       │
-│      [01] 首次配置 / 重新检测容器与数据目录                           │
-│      [02] 立即备份当前数据并推送 GitHub                               │
-│      [03] 从 GitHub 选择备份并恢复数据                               │
-│      [04] 检查当前环境和备份配置                                     │
-├──────────────────────────────────────────────────────────────────────┤
-│  02 · 备份管理                                                       │
-│      [05] 查看最近备份日志                                           │
-│      [06] 查看自动备份定时任务帮助                                   │
-│      [07] 更新已安装的后台脚本（保留现有配置）                       │
-│      [08] 验证 GitHub 历史备份（SHA256 / age / SQLite）               │
-├──────────────────────────────────────────────────────────────────────┤
-│  03 · 自动化管理                                                     │
-│      [09] 安装 systemd 自动备份 / 修改执行时间                       │
-│      [10] 查看 systemd 定时任务状态                                 │
-│      [11] 暂停自动备份                                               │
-│      [12] 恢复自动备份                                               │
-├──────────────────────────────────────────────────────────────────────┤
-│  04 · 安全与诊断                                                     │
-│      [13] 配置通知（Telegram / ntfy / Webhook）并发送测试             │
-│      [14] Vaultwarden 更新前自动备份保护                             │
-│      [15] 生成系统诊断报告                                           │
-├──────────────────────────────────────────────────────────────────────┤
-│  05 · 历史与恢复                                                     │
-│      [16] 历史备份管理（查看 / 永久保留 / 取消保留 / 删除）           │
-│      [17] 查看加密部署清单                                           │
-│      [18] 隔离恢复演练（不连接生产网络、不修改生产数据）             │
-├──────────────────────────────────────────────────────────────────────┤
-│  06 · 策略设置                                                       │
-│      [19] 配置备份策略（保留天数 / 磁盘阈值 / 推送重试）             │
-├──────────────────────────────────────────────────────────────────────┤
-│  07 · 性能监控                                                       │
-│      [20] 性能监控与执行耗时分析（备份 / 恢复 / GitHub / 校验）      │
-├──────────────────────────────────────────────────────────────────────┤
-│      [00] 退出                                                       │
-╰──────────────────────────────────────────────────────────────────────╯
-EOF
-    read -r -p "请选择操作 [00-20]: " choice || exit 0
+    render_main_menu
+    read -r -p "请选择操作 [00-21]: " choice || exit 0
     case "$choice" in
       1|01) configure_wizard || pause ;;
       2|02) run_backup_now || true ;;
@@ -1372,10 +1469,12 @@ EOF
       17) view_deployment_manifest || pause ;;
       18) restore_rehearsal || pause ;;
       19) configure_backup_policy || pause ;;
-      20|020) performance_monitor ;;
+      20) performance_monitor ;;
+      21) check_for_project_updates; pause ;;
       0|00) echo "已退出。"; exit 0 ;;
-      *) warn "无效选项，请输入 00-20。"; sleep 1 ;;
+      *) warn "无效选项，请输入 00-21。"; sleep 1 ;;
     esac
   done
 }
+
 main_menu "$@"

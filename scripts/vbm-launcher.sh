@@ -4,7 +4,7 @@ set -Eeuo pipefail
 PROJECT_RUNNER=__VBM_PROJECT_RUNNER__
 if [[ ! -f "$PROJECT_RUNNER" ]]; then
   echo "错误：找不到项目启动器：$PROJECT_RUNNER" >&2
-  echo "请重新克隆项目，或从项目目录运行 bash ./run.sh 完成安装。" >&2
+  echo "请重新克隆项目，并重新运行：sudo bash ./run.sh" >&2
   exit 1
 fi
 if [[ "$EUID" -ne 0 ]]; then
