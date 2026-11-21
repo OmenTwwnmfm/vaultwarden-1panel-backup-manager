@@ -66,10 +66,23 @@ done < "$LIST_FILE"
 echo "正在解密并解压到暂存目录..."
 age -d -i "$IDENTITY" "$ARCHIVE" | tar --numeric-owner --same-owner -xzpf - -C "$STAGING/data"
 
-[[ -f "$STAGING/data/db.sqlite3" ]] || {
-  echo "错误：解压后没有发现 db.sqlite3。请勿恢复这份备份。" >&2
+[[ -s "$STAGING/data/db.sqlite3" ]] || {
+  echo "错误：解压后没有发现非空 db.sqlite3。请勿恢复这份备份。" >&2
   exit 1
 }
+if command -v sqlite3 >/dev/null 2>&1; then
+  SQLITE_RESULT=$(sqlite3 -readonly "$STAGING/data/db.sqlite3" 'PRAGMA quick_check;' 2>&1) || {
+    echo "错误：恢复暂存数据库 quick_check 执行失败：$SQLITE_RESULT" >&2
+    exit 1
+  }
+  [[ "$SQLITE_RESULT" == "ok" ]] || {
+    echo "错误：恢复暂存数据库完整性检查未通过：$SQLITE_RESULT" >&2
+    exit 1
+  }
+  echo "SQLite quick_check：OK"
+else
+  echo "警告：未安装 sqlite3，跳过数据库 quick_check。"
+fi
 
 rm -f -- "$LIST_FILE"
 trap - EXIT

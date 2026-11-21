@@ -1,83 +1,87 @@
-Vaultwarden（1Panel 应用商店版）交互式备份与恢复脚本包 v1.2.1
-========================================================
+Vaultwarden 1Panel Backup Manager v1.3.0
+=======================================
 
 适用环境
 --------
-- Ubuntu / Debian VPS。
+- Ubuntu / Debian VPS，使用 systemd。
 - Docker 已由 1Panel 安装和管理。
 - Vaultwarden 已从 1Panel 应用商店安装为 Docker 应用。
-- Vaultwarden 使用 SQLite，容器内数据目录为 /data。
-- 当前用户具有 root 权限，或可以通过 sudo 管理 Docker。
+- 使用 SQLite，容器内数据目录挂载为 /data。
+- 具有 root 权限或可通过 sudo 管理 Docker、systemd 和系统目录。
 
-本项目不会安装 Docker、安装 Vaultwarden、配置域名、HTTPS、反向代理或 Cloudflare。以上仍由 1Panel 管理。
+本项目不会安装 Docker、Vaultwarden、域名、HTTPS 或反向代理；这些均由 1Panel 负责。
 
-推荐入口：项目根目录的 run.sh
---------------------------------
-本脚本包优先使用交互式管理器，不要求新手手动输入容器名称或猜测数据目录。
-
-从 GitHub 克隆完整项目后，在项目根目录运行：
+启动方式
+--------
+从 GitHub 克隆完整项目后：
 
   sudo bash ./run.sh
 
-run.sh 会检查项目文件并启动 scripts/vw-manager.sh。不要只下载 run.sh 或 vw-manager.sh 单个文件。
+首次配置选择菜单 1。管理器自动扫描 Vaultwarden 容器，通过 docker inspect 读取 /data 的主机路径；多个候选实例会要求人工选择。随后配置 GitHub Deploy Key、age 公钥、本地目录和保留策略。
 
-如果当前终端已经是 root，可以省略 sudo。
-
-菜单：
+主菜单
+------
   1) 首次配置 / 重新检测容器与数据目录
   2) 立即备份当前数据并推送 GitHub
   3) 从 GitHub 选择备份并恢复数据
   4) 检查当前环境和备份配置
   5) 查看最近备份日志
-  6) 查看 1Panel 每日 05:20 计划任务设置
+  6) 查看自动备份定时任务帮助
   7) 更新已安装的后台脚本（保留现有配置）
-  8) 验证 GitHub 上已有备份（SHA256 / age 解密 / SQLite）
+  8) 验证 GitHub 历史备份（SHA256 / age / SQLite）
+  9) 安装 systemd 自动备份 / 修改执行时间
+ 10) 查看 systemd 定时任务状态
+ 11) 暂停自动备份
+ 12) 恢复自动备份
+ 13) 配置 Telegram / ntfy / Webhook 通知并测试
+ 14) Vaultwarden 更新前自动备份保护
+ 15) 生成系统诊断报告
+ 16) 历史备份管理（查看 / 永久保留 / 取消保留 / 删除）
+ 17) 查看加密部署清单
+ 18) 隔离恢复演练（临时容器启动，不接入生产网络、不修改生产数据）
+ 19) 配置保留天数 / 磁盘阈值 / GitHub 推送重试
   0) 退出
 
-菜单 1 会扫描 Vaultwarden 容器，使用 docker inspect 获取容器内 /data 对应的主机 Source 路径，确认其中存在 db.sqlite3，再引导配置 GitHub Deploy Key 和 age 公钥，生成权限为 600 的配置文件，并安装脚本。
+自动备份调度
+------------
+推荐使用 Ubuntu/Debian 自带的 systemd timer，不依赖 1Panel 计划任务。首次手动备份成功后，在菜单 9 安装，可选择每天、每周日或每月 1 日，默认每天 VPS 本地时间 05:20；可修改频率和执行时间。systemd timer 使用 Persistent=true，VPS 关机错过计划后可以在下次启动补执行。
 
-菜单 2 会在每次执行时重新扫描当前 Vaultwarden 容器，并按已记录的 /data 主机路径优先匹配；因此 1Panel 重建容器、名称后缀变化时无需手工改容器名。如果已记录的数据目录不存在，或当前容器没有挂载该目录，脚本会安全停止并要求通过菜单 1 重新确认，不会擅自切换到另一个数据目录。确认后短暂停止容器，对整个 /data 目录打包并直接使用 age 公钥加密；加密快照完成后立即启动容器，再把密文与 SHA256 文件推送到 GitHub Private 仓库。备份大小会优先显示 KiB，同时显示 MiB 和精确字节数；仓库推送后还会核对远程提交 ID。
+常用命令：
+  systemctl list-timers --all | grep vw-backup
+  systemctl status vw-backup.timer
+  systemctl start vw-backup.service
+  journalctl -u vw-backup.service -n 100 --no-pager
+  tail -n 100 /var/log/vaultwarden-backup.log
 
-菜单 3 会从 GitHub 克隆备份仓库，列出当前分支可见的备份，选择后校验 SHA256、验证 age 私钥匹配、解密到暂存目录，再检测目标容器与 /data 路径。恢复前会显示加密回滚快照路径，必须输入大写 YES 才会替换数据。为兼容 Docker bind mount 和命名卷，脚本保留 /data 挂载点本身，只替换内部内容；恢复前的当前数据先用 age 公钥加密保存。复制失败时脚本使用你提供的原 age 私钥尝试回滚；自动回滚失败则保持容器停止。
+如果此前在 1Panel 计划任务或 crontab 设置了同一备份命令，请停用旧任务，避免重复运行。
 
-菜单 4 检查容器、数据目录、SQLite 文件、磁盘空间、age 公钥和 GitHub SSH 连接。
-菜单 5 查看最近备份日志。
-菜单 6 显示 1Panel 计划任务设置方式。菜单 7 仅更新已安装的后台脚本，不修改加密公钥、SSH 密钥或现有配置。菜单 8 从 GitHub 下载指定备份，执行 SHA256、age 实际解密、tar 清单及可选 SQLite quick_check，不会修改生产数据。
+备份范围与验证
+--------------
+备份整个 /data，而不是只备份 db.sqlite3。包含 SQLite/WAL/SHM、附件、Send 文件、config.json、RSA 密钥等（存在时）。备份期间 Vaultwarden 会短暂停止；生成加密快照后立即尝试启动，再执行 GitHub 上传。
 
-安全提示
+自动备份使用 age 公钥，不要求 age 私钥长期存放在 VPS。若私钥仅离线保存，自动任务不会声称进行了实际解密验证。应定期使用菜单 8 或 18，临时提供原 age 私钥，执行 SHA256、age 实际解密、tar 清单和 SQLite quick_check。
+
+每次备份还会生成单独加密的脱敏部署清单，记录镜像、挂载、端口、网络及白名单非敏感环境变量。秘密变量只记录名称，不保存值。灾难恢复时可用菜单 17 查看清单。
+
+恢复安全
 --------
-- GitHub 源码仓库与 GitHub 加密备份仓库必须分开。
-- age 公钥可以放在服务器配置中；age 私钥必须离线保存至少两份并验证可读。初次生成时私钥会暂时留在 VPS，确认离线副本安全后建议从 VPS 删除；恢复时再临时复制回来。私钥不能提交 GitHub。
-- GitHub SSH Deploy Key 与 age 密钥是两套完全不同的密钥。
-- 恢复时必须使用原 age 私钥。新 VPS 不能新生成一把 age 私钥来替代旧密钥。
-- 恢复前当前 /data 会先生成 age 加密回滚快照，文件位于 BACKUP_DIR/pre-restore-*.tar.gz.age，并有对应 SHA256。确认恢复成功以前不要删除该快照。
-- Vaultwarden 主密码、用户登录两步验证设备和恢复码并不会由服务器备份替代。
+恢复前先将当前 /data 加密保存为本地 pre-restore 回滚快照，然后才替换挂载目录内部文件。恢复后等待容器达到 running/healthy；失败时尝试回滚。恢复完成后还需人工登录验证用户、密码库、附件、TOTP 和客户端同步。确认成功之前不要删除回滚快照。
+
+安全说明
+--------
+- 源码仓库与 Vaultwarden 加密备份仓库必须分开。备份仓库必须为 GitHub Private。
+- age 公钥可以放入 VPS 配置；AGE-SECRET-KEY-1 私钥离线保存至少两份。私钥丢失将无法解密备份。
+- GitHub SSH Deploy Key 用于访问仓库，age 密钥用于数据加密，二者不可混淆。
+- 不要提交真实配置、Token、SSH 私钥、age 私钥、数据库、附件或 .age 备份到源码仓库。
+- 仅支持 SQLite 和容器内 /data 挂载；不支持 MySQL/PostgreSQL。
+- 单文件默认限制 90 MiB；当前项目不集成 Restic/S3，也不使用多 age 密钥。Git 删除文件不会清除历史提交中的旧对象，需留意仓库体积。
 
 文件说明
 --------
-- vw-manager.sh：交互式菜单管理器，负责检测、配置、立即备份、GitHub 恢复、检查、验证备份和日志。
-- vw-common.sh：公共函数库；负责每次重新发现当前容器、校验 /data 挂载，并安全回写容器名和数据路径。
-- vw-backup.sh：底层备份脚本；每次运行都动态发现当前容器，1Panel 定时任务每天 05:20 调用它。
-- vw-restore-prepare.sh：底层解密和暂存脚本，不会自行覆盖应用数据目录。
-- backup.conf.example：手动部署/高级排错使用的配置模板；正常使用由管理器生成 /etc/vaultwarden-backup.conf。
-- 1Panel-Vaultwarden-信息记录模板.txt：记录应用版本、域名和必要非敏感参数。
-
-每天 05:20 自动执行
-------------------
-在 1Panel → 计划任务中新建 Shell 脚本任务：
-- Cron：20 5 * * *
-- 脚本：bash /usr/local/sbin/vw-backup.sh
-- 用户：root 或具有 Docker 管理权限的用户
-
-只设置一处定时任务，不要再重复添加 crontab。日志：
-
-  tail -n 100 /var/log/vaultwarden-backup.log
-
-限制与边界
-----------
-- 仅支持 SQLite，且容器内数据挂载目标为 /data；不支持 MySQL/PostgreSQL。
-- 备份时会短暂停止 Vaultwarden；加密快照生成后立即启动，GitHub 上传在服务启动后进行。低于 16 KiB 会提示人工验证，但不会仅因小文件大小就判定失败；请通过菜单 8 使用原 age 私钥执行实际解密验证。
-- GitHub 普通 Git 文件限制为 100 MB；脚本默认单份密文限制为 90 MiB。大附件建议使用 Restic/Rustic 和对象存储。
-- 删除当前分支目录中的旧备份不会清除 Git 历史对象，仓库可能持续增长。
-- 脚本备份 /data，不包括 1Panel 应用编排、容器镜像、环境变量、域名和证书。请单独记录恢复所需的非敏感部署参数。
-- 首次正式依赖前必须完成一次真实恢复演练。
+- vw-manager.sh：交互菜单、系统定时任务、通知、恢复、历史管理等。
+- vw-common.sh：容器动态发现、配置保存、通知与格式化。
+- vw-backup.sh：systemd 和手动调用的非交互备份工作器。
+- vw-restore-prepare.sh：SHA256、age 解密、tar 安全检查和 SQLite 暂存验证。
+- vw-manifest.py：创建脱敏部署清单。
+- vw-diagnose.sh：输出不包含密钥值的系统诊断报告。
+- backup.conf.example：配置字段说明。

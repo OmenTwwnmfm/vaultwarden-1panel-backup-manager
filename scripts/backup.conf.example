@@ -1,30 +1,30 @@
-# 复制为 /etc/vaultwarden-backup.conf 后填写真实信息；不要把真实配置上传到 GitHub。
-# CONTAINER：首次识别到的容器名称。新版本每次备份都会重新发现；1Panel 重建容器后会自动更新。
-CONTAINER="1Panel-Vaultwarden-实际容器名"
-
-# DATA_DIR：docker inspect 中 Destination=/data 对应的主机 Source 路径。新版本每次备份都会核对并自动更新。
-# 绝对不要猜路径，也不要填写容器内部的 /data。
-DATA_DIR="/请替换为实际主机数据目录"
-
-# age 公钥，以 age1 开头；不是 AGE-SECRET-KEY-1 私钥。
-AGE_RECIPIENT="age1替换为你的age公钥"
-
-# GitHub 私有仓库 SSH 地址。创建仓库时保持空仓库，不添加 README。
-GITHUB_REPO="git@github.com:你的GitHub用户名/vaultwarden-backup.git"
+# 示例配置，不要将真实配置文件提交到源码仓库。
+# 正常情况下由交互式管理器生成 /etc/vaultwarden-backup.conf。
+CONTAINER="1Panel-bitwarden-example"
+DATA_DIR="/opt/1panel/apps/bitwarden/bitwarden/data"
+AGE_RECIPIENT="age1replace_with_your_public_recipient"
+GITHUB_REPO="git@github.com:YOUR_USER/vaultwarden-backup.git"
 GITHUB_BRANCH="main"
-
-# 专门用于此仓库写入的 SSH 私钥；不要填 .pub 公钥文件。
 GITHUB_SSH_KEY="/root/.ssh/vw_github_backup"
-
-# 本地加密备份和 Git 工作目录。
 BACKUP_DIR="/var/backups/vaultwarden"
 REPO_DIR="/opt/vw-github-repo"
-
-# 本地备份保留天数；Git 当前分支也清理旧文件，但 Git 历史仍会增长。
 RETENTION_DAYS="30"
-
-# GitHub 普通 Git 单文件限制为 100 MB；设为 90 MiB 留出余量。
 MAX_FILE_MIB="90"
-
-# 恢复时 age 私钥文件的默认提示路径（可在交互式恢复时改填 U 盘/SFTP 复制来的路径）。
 AGE_IDENTITY_DEFAULT="/root/vw-age-identity.txt"
+
+# 自动化：每日 VPS 本地时间 05:20；由菜单 9 安装 systemd timer。
+SYSTEMD_TIME="*-*-* 05:20:00"
+BACKUP_FREQUENCY="daily"  # daily / weekly / monthly
+MIN_FREE_MB="512"
+GIT_PUSH_RETRIES="3"
+GIT_RETRY_DELAY="15"
+
+# 通知方式：none / telegram / ntfy / webhook。
+NOTIFY_METHOD="none"
+TELEGRAM_BOT_TOKEN=""
+TELEGRAM_CHAT_ID=""
+NTFY_URL=""
+NTFY_TOKEN=""
+WEBHOOK_URL=""
+NOTIFY_ON_SUCCESS="true"
+NOTIFY_ON_FAILURE="true"

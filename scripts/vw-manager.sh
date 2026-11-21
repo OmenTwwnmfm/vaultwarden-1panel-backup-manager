@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION="1.2.1"
+VERSION="1.3.0"
 CONFIG_FILE="/etc/vaultwarden-backup.conf"
 BACKUP_SCRIPT="/usr/local/sbin/vw-backup.sh"
 RESTORE_SCRIPT="/usr/local/sbin/vw-restore-prepare.sh"
@@ -75,7 +75,7 @@ require_docker() {
 
 install_dependencies() {
   local missing=() pkg
-  for cmd in age age-keygen git ssh-keygen ssh-keyscan sha256sum tar gzip flock sqlite3; do
+  for cmd in age age-keygen git ssh-keygen ssh-keyscan sha256sum tar gzip flock sqlite3 python3 logrotate; do
     command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
   done
   if ((${#missing[@]} == 0)); then
@@ -90,7 +90,7 @@ install_dependencies() {
   confirm_yes "是否使用 apt 安装缺少的备份工具？" || { warn "已取消。"; return 1; }
   export DEBIAN_FRONTEND=noninteractive
   if ! apt-get update; then err "apt-get update 失败，请检查 VPS 软件源和网络。"; return 1; fi
-  if ! apt-get install -y age git openssh-client coreutils tar gzip util-linux findutils sqlite3; then err "依赖安装失败。"; return 1; fi
+  if ! apt-get install -y age git openssh-client coreutils tar gzip util-linux findutils sqlite3 python3 logrotate; then err "依赖安装失败。"; return 1; fi
   ok "备份工具安装完成。"
 }
 
@@ -175,6 +175,20 @@ load_config() {
   fi
   # shellcheck disable=SC1090
   source "$CONFIG_FILE"
+  # Backward-compatible defaults for configurations created by v1.2.x.
+  SYSTEMD_TIME="${SYSTEMD_TIME:-*-*-* 05:20:00}"
+  BACKUP_FREQUENCY="${BACKUP_FREQUENCY:-daily}"
+  MIN_FREE_MB="${MIN_FREE_MB:-512}"
+  GIT_PUSH_RETRIES="${GIT_PUSH_RETRIES:-3}"
+  GIT_RETRY_DELAY="${GIT_RETRY_DELAY:-15}"
+  NOTIFY_METHOD="${NOTIFY_METHOD:-none}"
+  TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
+  TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}"
+  NTFY_URL="${NTFY_URL:-}"
+  NTFY_TOKEN="${NTFY_TOKEN:-}"
+  WEBHOOK_URL="${WEBHOOK_URL:-}"
+  NOTIFY_ON_SUCCESS="${NOTIFY_ON_SUCCESS:-true}"
+  NOTIFY_ON_FAILURE="${NOTIFY_ON_FAILURE:-true}"
 }
 
 make_ssh_command() {
@@ -297,6 +311,19 @@ write_config() {
     printf 'RETENTION_DAYS=%q\n' "$retention"
     printf 'MAX_FILE_MIB=%q\n' "$max_mib"
     printf 'AGE_IDENTITY_DEFAULT=%q\n' "$identity_default"
+    printf 'SYSTEMD_TIME=%q\n' "${SYSTEMD_TIME:-*-*-* 05:20:00}"
+    printf 'BACKUP_FREQUENCY=%q\n' "${BACKUP_FREQUENCY:-daily}"
+    printf 'MIN_FREE_MB=%q\n' "${MIN_FREE_MB:-512}"
+    printf 'GIT_PUSH_RETRIES=%q\n' "${GIT_PUSH_RETRIES:-3}"
+    printf 'GIT_RETRY_DELAY=%q\n' "${GIT_RETRY_DELAY:-15}"
+    printf 'NOTIFY_METHOD=%q\n' "${NOTIFY_METHOD:-none}"
+    printf 'TELEGRAM_BOT_TOKEN=%q\n' "${TELEGRAM_BOT_TOKEN:-}"
+    printf 'TELEGRAM_CHAT_ID=%q\n' "${TELEGRAM_CHAT_ID:-}"
+    printf 'NTFY_URL=%q\n' "${NTFY_URL:-}"
+    printf 'NTFY_TOKEN=%q\n' "${NTFY_TOKEN:-}"
+    printf 'WEBHOOK_URL=%q\n' "${WEBHOOK_URL:-}"
+    printf 'NOTIFY_ON_SUCCESS=%q\n' "${NOTIFY_ON_SUCCESS:-true}"
+    printf 'NOTIFY_ON_FAILURE=%q\n' "${NOTIFY_ON_FAILURE:-true}"
   } > "$tmp"
   install -o root -g root -m 600 "$tmp" "$CONFIG_FILE"
   rm -f "$tmp"
@@ -304,7 +331,7 @@ write_config() {
 
 install_helper_scripts() {
   local source_dir="$SCRIPT_DIR"
-  [[ -f "$source_dir/vw-common.sh" && -f "$source_dir/vw-backup.sh" && -f "$source_dir/vw-restore-prepare.sh" ]] || {
+  [[ -f "$source_dir/vw-common.sh" && -f "$source_dir/vw-backup.sh" && -f "$source_dir/vw-restore-prepare.sh" && -f "$source_dir/vw-manifest.py" && -f "$source_dir/vw-diagnose.sh" ]] || {
     err "项目脚本不完整，缺少 vw-common.sh / vw-backup.sh / vw-restore-prepare.sh。"
     return 1
   }
@@ -312,17 +339,24 @@ install_helper_scripts() {
   install -o root -g root -m 644 "$source_dir/vw-common.sh" /usr/local/libexec/vw-common.sh || return 1
   install -o root -g root -m 700 "$source_dir/vw-backup.sh" "$BACKUP_SCRIPT" || return 1
   install -o root -g root -m 700 "$source_dir/vw-restore-prepare.sh" "$RESTORE_SCRIPT" || return 1
+  install -o root -g root -m 755 "$source_dir/vw-manifest.py" /usr/local/libexec/vw-manifest.py || return 1
+  install -o root -g root -m 700 "$source_dir/vw-diagnose.sh" /usr/local/sbin/vw-diagnose.sh || return 1
   install -o root -g root -m 700 "${BASH_SOURCE[0]}" "$MANAGER_SCRIPT" || return 1
+  install -d -o root -g root -m 755 /etc/logrotate.d
+  install -o root -g root -m 644 "$(dirname "$source_dir")/logrotate-vaultwarden-backup" /etc/logrotate.d/vaultwarden-backup || return 1
   ok "后台脚本已安装/更新："
   echo "  /usr/local/libexec/vw-common.sh"
+  echo "  /usr/local/libexec/vw-manifest.py"
   echo "  $BACKUP_SCRIPT"
   echo "  $RESTORE_SCRIPT"
+  echo "  /usr/local/sbin/vw-diagnose.sh"
   echo "  $MANAGER_SCRIPT"
+  echo "  /etc/logrotate.d/vaultwarden-backup"
 }
 
 update_installed_scripts() {
   [[ -f "$CONFIG_FILE" ]] || { err "尚未完成首次配置，请先运行菜单 1。"; return 1; }
-  echo "将只更新管理器和后台脚本，不会修改 /etc/vaultwarden-backup.conf、age 公钥、SSH 密钥或 GitHub 仓库。"
+  echo "将更新管理器、备份/恢复/诊断工具及公共库，不会修改 /etc/vaultwarden-backup.conf、age 公钥、SSH 密钥或 GitHub 仓库。若 systemd timer 已安装，timer 文件会保留。"
   confirm_yes_upper "确认安装当前项目目录中的新版脚本？" || { warn "已取消。"; return 0; }
   install_helper_scripts || { err "脚本更新失败。"; return 1; }
   ok "更新完成。下一次备份将自动重新检测 1Panel 当前容器名称及 /data 主机目录。"
@@ -431,7 +465,7 @@ configure_wizard() {
     echo "请确认离线副本至少两份且已验证可读；确认后建议从 VPS 删除这份私钥。"
     echo "将来恢复时，再把离线私钥临时复制到服务器，并在菜单 3 中填写路径。"
   fi
-  warn "下一步建议先在菜单中选择「立即备份并推送」，测试成功后，再到 1Panel → 计划任务配置每天 05:20。"
+  warn "下一步先选择「立即备份并推送」完成测试，然后选择菜单 9 安装 systemd 自动备份（默认每天 05:20，不依赖 1Panel 计划任务）。"
   pause
 }
 
@@ -627,6 +661,14 @@ restore_from_github() (
     return 1
   fi
   (cd "$BACKUP_DIR" && sha256sum "$(basename "$rollback_archive")" > "$(basename "$rollback_archive").sha256")
+  if ! (cd "$BACKUP_DIR" && sha256sum -c "$(basename "$rollback_archive").sha256") || ! age -d -i "$identity" "$rollback_archive" | tar -tzf - >/dev/null; then
+    err "恢复前回滚快照校验失败，生产数据尚未替换。"
+    rm -f -- "$rollback_archive" "$rollback_archive.sha256"
+    if ((was_running == 1)); then
+      if docker start "$container" >/dev/null 2>&1; then stopped_by_script=0; else warn "请在 1Panel 中手动启动容器。"; fi
+    fi
+    return 1
+  fi
 
   # Keep the Docker bind/named-volume mountpoint itself intact. Only replace its
   # contents, so Docker/1Panel continues mounting the same Source path.
@@ -678,11 +720,22 @@ restore_from_github() (
     start_choice="yes"
   fi
   if [[ "${start_choice,,}" == "yes" ]]; then
-    if docker start "$container" >/dev/null; then
+    if docker start "$container" >/dev/null && vw_wait_healthy "$container" 30 2; then
       stopped_by_script=0
-      ok "Vaultwarden 已启动。请到 1Panel 查看应用状态和容器日志。"
+      ok "Vaultwarden 已启动并达到 running/healthy 状态。"
     else
-      err "容器启动失败。恢复数据仍在；原数据的加密回滚快照保留在 $rollback_archive。请在 1Panel 中检查启动日志。"
+      err "恢复后的实例未能正常启动/健康检查未通过，准备回滚到恢复前数据。"
+      docker stop --time 20 "$container" >/dev/null 2>&1 || true
+      if rollback_from_snapshot && docker start "$container" >/dev/null && vw_wait_healthy "$container" 30 2; then
+        stopped_by_script=0
+        data_change_started=0
+        warn "已自动回滚到恢复前数据并成功启动。原回滚文件仍保留：$rollback_archive"
+      else
+        stopped_by_script=1
+        data_change_started=1
+        err "严重错误：恢复后的实例未通过健康检查，自动回滚/启动也未完全成功。容器可能保持停止。回滚文件：$rollback_archive"
+        echo "请勿在 1Panel 中启动容器，先检查数据目录和回滚文件。"
+      fi
       rm -rf -- "$staging" "$temp_root"
       return 1
     fi
@@ -765,6 +818,369 @@ verify_github_backup() (
   pause
 )
 
+
+restore_rehearsal() (
+  set -Eeuo pipefail
+  local temp_root="" repo_tmp="" identity="" restore_ssh_key="" archive="" staging="" container="" image="" test_name="" choice="" state="" health="" i
+  local -a archives=()
+  cleanup_rehearsal() {
+    if [[ -n "${test_name:-}" ]] && docker inspect "$test_name" >/dev/null 2>&1; then
+      docker rm -f "$test_name" >/dev/null 2>&1 || true
+    fi
+    [[ -n "${temp_root:-}" ]] && rm -rf -- "$temp_root"
+    return 0
+  }
+  trap cleanup_rehearsal EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  require_root
+  require_docker || return 1
+  load_config || return 1
+  [[ -x "$RESTORE_SCRIPT" ]] || { err "恢复准备脚本未安装，请先运行菜单 7。"; return 1; }
+  local -a container_candidates=()
+  if ! vw_find_target "$CONTAINER" "$DATA_DIR" true; then
+    err "无法确认生产 Vaultwarden 容器和 /data 路径。恢复演练停止。"
+    return 1
+  fi
+  image="$VW_DETECTED_IMAGE"
+  container="$VW_DETECTED_CONTAINER"
+  docker image inspect "$image" >/dev/null 2>&1 || { err "当前镜像在本机不存在：$image。请先在 1Panel 正常更新/拉取后再演练。"; return 1; }
+  temp_root=$(mktemp -d /var/tmp/vw-drill.XXXXXX); chmod 700 "$temp_root"
+  repo_tmp="$temp_root/repository"
+  restore_ssh_key=$(read_default "GitHub SSH 私钥路径" "$GITHUB_SSH_KEY")
+  [[ -f "$restore_ssh_key" ]] || { err "找不到 GitHub SSH 私钥：$restore_ssh_key"; return 1; }
+  echo "正在读取 GitHub 历史备份..."
+  clone_for_restore "$GITHUB_REPO" "$GITHUB_BRANCH" "$repo_tmp" "$restore_ssh_key" || { err "无法克隆备份仓库。"; return 1; }
+  mapfile -t archives < <(find "$repo_tmp" -maxdepth 1 -type f -name 'vw-*.tar.gz.age' -printf '%f\n' | sort -r)
+  ((${#archives[@]} > 0)) || { err "仓库中没有找到加密数据备份。"; return 1; }
+  echo "可进行隔离容器启动测试的备份："
+  for i in "${!archives[@]}"; do printf '  %2d) %s (%s)\n' "$((i+1))" "${archives[$i]}" "$(stat -c '%s bytes' "$repo_tmp/${archives[$i]}")"; done
+  read -r -p "选择备份编号: " choice
+  [[ "$choice" =~ ^[0-9]+$ ]] && ((choice>=1 && choice<=${#archives[@]})) || { err "编号无效。"; return 1; }
+  archive="$repo_tmp/${archives[$((choice-1))]}"
+  identity=$(read_default "原 age 私钥文件路径" "${AGE_IDENTITY_DEFAULT:-/root/vw-age-identity.txt}")
+  [[ -f "$identity" ]] || { err "找不到原 age 私钥。"; return 1; }
+  local pub
+  pub=$(age-keygen -y "$identity") || { err "无法读取 age 私钥。"; return 1; }
+  [[ "$pub" == "$AGE_RECIPIENT" ]] || { err "此私钥与配置中的 AGE_RECIPIENT 不匹配。"; return 1; }
+  staging="$temp_root/staging"
+  bash "$RESTORE_SCRIPT" "$archive" "$identity" "$staging" || { err "备份解密或 SQLite 检查失败。"; return 1; }
+  test_name="vw-restore-drill-$(date +%Y%m%d%H%M%S)-$$"
+  echo
+  echo "========== 隔离恢复演练计划 =========="
+  printf '备份文件：%s\n生产容器：%s\n测试镜像：%s\n临时容器：%s\n' "$(basename "$archive")" "$container" "$image" "$test_name"
+  echo "隔离措施：--network none；不映射任何宿主机端口；仅挂载临时解密数据目录。"
+  echo "测试容器可能写入其临时 /data，但不会挂载或修改生产 Vaultwarden 数据目录。"
+  confirm_yes_upper "确认创建隔离的临时 Vaultwarden 容器进行启动测试？" || { warn "已取消。"; return 0; }
+  docker run -d --name "$test_name" --network none --restart=no \
+    --label "com.vw-backup-manager.restore-drill=true" \
+    --mount "type=bind,src=$staging/data,dst=/data" "$image" >/dev/null || { err "临时容器创建失败。"; return 1; }
+  local passed=0
+  for ((i=1; i<=30; i++)); do
+    state=$(docker inspect -f '{{.State.Status}}' "$test_name" 2>/dev/null || echo missing)
+    health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' "$test_name" 2>/dev/null || echo unknown)
+    if [[ "$state" == running && ( "$health" == healthy || "$health" == no-healthcheck ) ]]; then passed=1; break; fi
+    [[ "$state" == exited || "$state" == dead || "$state" == missing ]] && break
+    sleep 2
+  done
+  echo
+  echo "临时容器状态：$state；健康检查：$health"
+  echo "临时容器启动日志："
+  docker logs --tail 60 "$test_name" 2>&1 || true
+  if ((passed==1)); then
+    ok "隔离恢复演练通过：归档成功解密，SQLite 检查已通过，Vaultwarden 容器进程正常运行。"
+    echo "本次未暴露 HTTP 端口，也未连接生产网络。"
+  else
+    err "隔离恢复演练未通过。生产容器和生产数据未被修改；请检查上面的临时容器日志、镜像兼容性和该备份版本。"
+  fi
+  docker rm -f "$test_name" >/dev/null 2>&1 || true
+  test_name=""
+  return $((passed==1 ? 0 : 1))
+)
+
+install_systemd_timer() {
+  load_config || return 1
+  command -v systemctl >/dev/null 2>&1 || { err "当前系统没有 systemctl，无法使用 systemd timer。"; return 1; }
+  local hhmm frequency calendar default_hhmm
+  echo "可选备份频率：daily（每天）、weekly（每周日）、monthly（每月 1 日）。"
+  frequency=$(read_default "备份频率 daily/weekly/monthly" "${BACKUP_FREQUENCY:-daily}")
+  frequency="${frequency,,}"
+  [[ "$frequency" == daily || "$frequency" == weekly || "$frequency" == monthly ]] || { err "频率仅支持 daily、weekly 或 monthly。"; return 1; }
+  default_hhmm=$(grep -oE '[0-9]{2}:[0-9]{2}:[0-9]{2}$' <<< "${SYSTEMD_TIME:-*-*-* 05:20:00}" | sed 's/:00$//')
+  default_hhmm="${default_hhmm:-05:20}"
+  hhmm=$(read_default "备份执行时间（VPS 本地时间，HH:MM）" "$default_hhmm")
+  [[ "$hhmm" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || { err "时间格式不正确，请使用 05:20 这样的 HH:MM 格式。"; return 1; }
+  case "$frequency" in
+    daily) calendar="*-*-* ${hhmm}:00" ;;
+    weekly) calendar="Sun *-*-* ${hhmm}:00" ;;
+    monthly) calendar="*-*-01 ${hhmm}:00" ;;
+  esac
+  if command -v systemd-analyze >/dev/null 2>&1; then
+    systemd-analyze calendar "$calendar" >/dev/null 2>&1 || { err "systemd 不接受这个日历表达式：$calendar"; return 1; }
+  fi
+  SYSTEMD_TIME="$calendar"
+  BACKUP_FREQUENCY="$frequency"
+  vw_save_config || { err "保存配置失败。"; return 1; }
+  cat > /etc/systemd/system/vw-backup.service <<'UNIT'
+[Unit]
+Description=Scheduled Vaultwarden encrypted backup to GitHub
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+Environment=VW_EXECUTION_MODE=systemd
+ExecStart=/usr/local/sbin/vw-backup.sh
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+TimeoutStartSec=infinity
+UNIT
+  cat > /etc/systemd/system/vw-backup.timer <<UNIT
+[Unit]
+Description=Scheduled Vaultwarden backup timer
+
+[Timer]
+OnCalendar=${SYSTEMD_TIME}
+Persistent=true
+AccuracySec=1s
+Unit=vw-backup.service
+
+[Install]
+WantedBy=timers.target
+UNIT
+  chmod 644 /etc/systemd/system/vw-backup.service /etc/systemd/system/vw-backup.timer
+  systemctl daemon-reload || return 1
+  systemctl enable --now vw-backup.timer || return 1
+  case "$frequency" in
+    daily) ok "systemd 自动备份已启用：每天 VPS 本地时间 $hhmm。" ;;
+    weekly) ok "systemd 自动备份已启用：每周日 VPS 本地时间 $hhmm。" ;;
+    monthly) ok "systemd 自动备份已启用：每月 1 日 VPS 本地时间 $hhmm。" ;;
+  esac
+  warn "如果以前配置过 1Panel 计划任务，请将旧任务停用，避免同一时间重复备份。"
+  systemctl list-timers --all | grep -E 'NEXT|vw-backup' || true
+  pause
+}
+
+systemd_timer_status() {
+  echo "========== systemd 定时备份状态 =========="
+  if systemctl list-unit-files vw-backup.timer --no-legend 2>/dev/null | grep -q vw-backup.timer; then
+    systemctl status --no-pager vw-backup.timer 2>&1 || true
+    echo
+    systemctl list-timers --all --no-pager | grep -E 'NEXT|vw-backup' || true
+    echo
+    systemctl show vw-backup.service -p Result -p ExecMainStatus -p ExecMainStartTimestamp -p ExecMainExitTimestamp 2>/dev/null || true
+  else
+    warn "尚未安装 systemd timer。"
+  fi
+  pause
+}
+
+pause_systemd_timer() {
+  if ! systemctl list-unit-files vw-backup.timer --no-legend 2>/dev/null | grep -q vw-backup.timer; then warn "systemd timer 尚未安装。"; pause; return 0; fi
+  confirm_yes_upper "确认暂停并禁用自动备份？现有备份不会删除。" || return 0
+  systemctl disable --now vw-backup.timer
+  ok "自动备份已暂停。后台脚本和历史数据均保留。"
+  pause
+}
+
+resume_systemd_timer() {
+  if [[ ! -f /etc/systemd/system/vw-backup.timer ]]; then err "找不到 timer 文件，请先使用菜单 9 安装/配置。"; return 1; fi
+  systemctl daemon-reload
+  systemctl enable --now vw-backup.timer
+  ok "自动备份已恢复。"
+  systemctl list-timers --all | grep -E 'NEXT|vw-backup' || true
+  pause
+}
+
+configure_notifications() {
+  load_config || return 1
+  echo "通知支持：none（关闭）、telegram、ntfy、webhook。通知失败不会影响备份结果。"
+  local method
+  method=$(read_default "通知方式" "${NOTIFY_METHOD:-none}")
+  method="${method,,}"
+  case "$method" in
+    none|telegram|ntfy|webhook) ;;
+    *) err "不支持的通知方式。"; return 1 ;;
+  esac
+  NOTIFY_METHOD="$method"
+  case "$method" in
+    telegram)
+      read -r -p "Telegram Bot Token（输入内容不会回显）: " -s TELEGRAM_BOT_TOKEN; echo
+      read -r -p "Telegram Chat ID: " TELEGRAM_CHAT_ID
+      ;;
+    ntfy)
+      NTFY_URL=$(read_default "ntfy 完整 Topic URL（例如 https://ntfy.sh/your-private-topic）" "${NTFY_URL:-}")
+      read -r -p "ntfy Access Token（没有则直接回车）: " -s NTFY_TOKEN; echo
+      ;;
+    webhook)
+      read -r -p "Webhook URL（输入内容不会回显）: " -s WEBHOOK_URL; echo
+      ;;
+    none)
+      TELEGRAM_BOT_TOKEN=""; TELEGRAM_CHAT_ID=""; NTFY_URL=""; NTFY_TOKEN=""; WEBHOOK_URL=""
+      ;;
+  esac
+  NOTIFY_ON_SUCCESS=$(read_default "是否发送备份成功通知 true/false" "${NOTIFY_ON_SUCCESS:-true}")
+  NOTIFY_ON_FAILURE=$(read_default "是否发送备份失败通知 true/false" "${NOTIFY_ON_FAILURE:-true}")
+  vw_save_config || { err "保存通知配置失败。"; return 1; }
+  ok "通知配置已保存到权限为 600 的配置文件。"
+  if [[ "$NOTIFY_METHOD" != none ]]; then
+    vw_notify success "Vaultwarden Backup Manager notification test from $(hostname)."
+    info "已发送测试通知；请检查你的 Telegram、ntfy 或 Webhook 接收端。"
+  fi
+  pause
+}
+
+preupgrade_backup() {
+  load_config || return 1
+  echo "升级前保护：先运行一次完整备份。只有备份脚本返回成功且远端提交校验通过，才建议继续在 1Panel 更新 Vaultwarden。"
+  confirm_yes_upper "确认现在创建升级前备份？" || return 0
+  if bash "$BACKUP_SCRIPT"; then
+    ok "升级前备份成功。现在可以进入 1Panel → 已安装应用 → Vaultwarden 执行更新。"
+    warn "本工具不会自动升级 Vaultwarden；升级后可再次运行菜单 4 检查新容器名称，并观察下一次备份。"
+  else
+    err "升级前备份失败。请勿继续更新 Vaultwarden，先查看日志并修复问题。"
+    return 1
+  fi
+  pause
+}
+
+configure_backup_policy() {
+  load_config || return 1
+  local retention max_mib min_free retries delay
+  echo "========== 备份策略 =========="
+  retention=$(read_default "本地及 Git 当前分支文件保留天数（Git 历史仍会保留旧对象）" "${RETENTION_DAYS:-30}")
+  max_mib=$(read_default "单个加密备份文件最大 MiB（建议不超过 90）" "${MAX_FILE_MIB:-90}")
+  min_free=$(read_default "数据盘最少可用空间 MB；不足则跳过备份" "${MIN_FREE_MB:-512}")
+  retries=$(read_default "GitHub 推送失败重试次数（1-10）" "${GIT_PUSH_RETRIES:-3}")
+  delay=$(read_default "每次重试基础等待秒数" "${GIT_RETRY_DELAY:-15}")
+  [[ "$retention" =~ ^[0-9]+$ ]] && ((retention >= 1 && retention <= 3650)) || { err "保留天数必须为 1-3650。"; return 1; }
+  [[ "$max_mib" =~ ^[0-9]+$ ]] && ((max_mib >= 1 && max_mib <= 95)) || { err "文件限制必须为 1-95 MiB。"; return 1; }
+  [[ "$min_free" =~ ^[0-9]+$ ]] && ((min_free >= 100)) || { err "最少可用空间至少为 100 MB。"; return 1; }
+  [[ "$retries" =~ ^[0-9]+$ ]] && ((retries >= 1 && retries <= 10)) || { err "重试次数必须为 1-10。"; return 1; }
+  [[ "$delay" =~ ^[0-9]+$ ]] && ((delay >= 1 && delay <= 600)) || { err "等待秒数必须为 1-600。"; return 1; }
+  RETENTION_DAYS="$retention"; MAX_FILE_MIB="$max_mib"; MIN_FREE_MB="$min_free"; GIT_PUSH_RETRIES="$retries"; GIT_RETRY_DELAY="$delay"
+  vw_save_config || { err "保存配置失败。"; return 1; }
+  ok "备份策略已保存。"
+  pause
+}
+
+generate_diagnostics() {
+  [[ -x /usr/local/sbin/vw-diagnose.sh ]] || { err "诊断脚本未安装，请先运行菜单 7 更新后台脚本。"; return 1; }
+  /usr/local/sbin/vw-diagnose.sh
+  pause
+}
+
+manage_history() (
+  set -Eeuo pipefail
+  load_config || return 1
+  local temp repo_tmp choice action file base manifest marker_content
+  local -a files=()
+  mkdir -p /run/lock
+  exec 8>"/run/lock/vaultwarden-backup.lock"
+  if ! flock -n 8; then err "备份/恢复正在运行，暂时不能管理历史记录。"; return 1; fi
+  temp=$(mktemp -d /var/tmp/vw-history.XXXXXX); chmod 700 "$temp"
+  trap 'rm -rf -- "$temp"' EXIT
+  repo_tmp="$temp/repo"
+  make_ssh_command "$GITHUB_SSH_KEY"
+  echo "正在读取 GitHub 当前分支的备份文件..."
+  git clone --quiet --branch "$GITHUB_BRANCH" "$GITHUB_REPO" "$repo_tmp" || { err "克隆备份仓库失败。"; return 1; }
+  git -C "$repo_tmp" config user.name "Vaultwarden Backup Manager"
+  git -C "$repo_tmp" config user.email "vaultwarden-backup@localhost"
+  mapfile -t files < <(find "$repo_tmp" -maxdepth 1 -type f -name 'vw-*.tar.gz.age' -printf '%f\n' | sort -r)
+  ((${#files[@]} > 0)) || { warn "仓库当前分支没有发现加密数据备份。"; pause; return 0; }
+  echo "GitHub 当前分支中的数据备份："
+  local i size status
+  for i in "${!files[@]}"; do
+    file="${files[$i]}"; size=$(stat -c '%s' "$repo_tmp/$file" 2>/dev/null || echo 0)
+    if [[ -e "$repo_tmp/$file.keep" ]]; then status="永久保留"; else status="按保留天数清理"; fi
+    printf '  %2d) %-42s %-24s %s\n' "$((i+1))" "$file" "$status" "$(vw_format_bytes "$size")"
+  done
+  echo
+  echo "操作：1 永久保留；2 取消永久保留；3 从当前分支删除；0 返回。"
+  read -r -p "请选择操作: " action
+  [[ "$action" =~ ^[0-3]$ ]] || { err "操作无效。"; return 1; }
+  (( action == 0 )) && return 0
+  read -r -p "输入备份编号: " choice
+  [[ "$choice" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= ${#files[@]})) || { err "编号无效。"; return 1; }
+  file="${files[$((choice-1))]}"
+  base="${file%.tar.gz.age}"
+  manifest="${base}.manifest.json.age"
+  case "$action" in
+    1)
+      if [[ -e "$repo_tmp/$file.keep" ]]; then warn "该备份已经标记为永久保留。"; pause; return 0; fi
+      marker_content="Protected by Vaultwarden 1Panel Backup Manager on $(date '+%F %T %Z'). This marker keeps this backup in the current Git branch and local retention cleanup."
+      printf '%s\n' "$marker_content" > "$repo_tmp/$file.keep"
+      if [[ -f "$repo_tmp/$manifest" ]]; then printf '%s\n' "$marker_content" > "$repo_tmp/$manifest.keep"; fi
+      confirm_yes_upper "确认将 $file 标记为永久保留？自动过期清理会跳过此备份。" || { warn "已取消。"; return 0; }
+      ;;
+    2)
+      if [[ ! -e "$repo_tmp/$file.keep" ]]; then warn "该备份没有永久保留标记。"; pause; return 0; fi
+      confirm_yes_upper "确认取消 $file 的永久保留？超过 RETENTION_DAYS 后可能被自动清理。" || { warn "已取消。"; return 0; }
+      rm -f -- "$repo_tmp/$file.keep" "$repo_tmp/$manifest.keep"
+      ;;
+    3)
+      if [[ -e "$repo_tmp/$file.keep" ]]; then err "该备份已标记为永久保留。请先选择操作 2 取消保护，再删除。"; return 1; fi
+      echo "将从 GitHub 当前分支和本地备份目录删除：$file、校验文件，以及对应部署清单（如存在）。"
+      echo "注意：Git 历史提交中的旧对象仍可能保留这些数据。"
+      confirm_yes_upper "确认删除这个备份？此操作会移除当前分支可见文件。" || { warn "已取消。"; return 0; }
+      rm -f -- "$repo_tmp/$file" "$repo_tmp/$file.sha256" "$repo_tmp/$manifest" "$repo_tmp/$manifest.sha256"
+      ;;
+  esac
+  git -C "$repo_tmp" add -A
+  if git -C "$repo_tmp" diff --cached --quiet; then
+    info "没有文件变化，无需提交。"; pause; return 0
+  fi
+  git -C "$repo_tmp" commit -m "Manage backup retention: ${file}"
+  git -C "$repo_tmp" push origin "$GITHUB_BRANCH"
+  case "$action" in
+    1)
+      mkdir -p "$BACKUP_DIR"; chmod 700 "$BACKUP_DIR"
+      [[ -f "$BACKUP_DIR/$file" ]] && cp -p "$repo_tmp/$file.keep" "$BACKUP_DIR/$file.keep"
+      [[ -f "$BACKUP_DIR/$manifest" && -f "$repo_tmp/$manifest.keep" ]] && cp -p "$repo_tmp/$manifest.keep" "$BACKUP_DIR/$manifest.keep"
+      ok "已设置永久保留标记。自动保留策略会跳过对应备份及部署清单。" ;;
+    2)
+      rm -f -- "$BACKUP_DIR/$file.keep" "$BACKUP_DIR/$manifest.keep"
+      ok "已取消永久保留标记。超过保留期限后可被自动清理。" ;;
+    3)
+      rm -f -- "$BACKUP_DIR/$file" "$BACKUP_DIR/$file.sha256" "$BACKUP_DIR/$manifest" "$BACKUP_DIR/$manifest.sha256"
+      ok "已从当前分支删除备份文件。Git 历史对象仍可能保留旧数据。" ;;
+  esac
+  pause
+)
+
+view_deployment_manifest() (
+  set -Eeuo pipefail
+  load_config || return 1
+  local temp repo_tmp identity choice file
+  local -a manifests=()
+  temp=$(mktemp -d /var/tmp/vw-manifest.XXXXXX); chmod 700 "$temp"
+  trap 'rm -rf -- "$temp"' EXIT
+  repo_tmp="$temp/repo"
+  make_ssh_command "$GITHUB_SSH_KEY"
+  git clone --quiet --branch "$GITHUB_BRANCH" "$GITHUB_REPO" "$repo_tmp" || { err "无法读取备份仓库。"; return 1; }
+  mapfile -t manifests < <(find "$repo_tmp" -maxdepth 1 -type f -name 'vw-*.manifest.json.age' -printf '%f\n' | sort -r)
+  ((${#manifests[@]} > 0)) || { warn "没有找到部署清单。请先运行一次新版备份。"; return 0; }
+  local i
+  for i in "${!manifests[@]}"; do printf '  %d) %s\n' "$((i+1))" "${manifests[$i]}"; done
+  read -r -p "选择清单编号: " choice
+  [[ "$choice" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= ${#manifests[@]})) || { err "编号无效。"; return 1; }
+  file="${manifests[$((choice-1))]}"
+  identity=$(read_default "原 age 私钥文件路径" "${AGE_IDENTITY_DEFAULT:-/root/vw-age-identity.txt}")
+  [[ -f "$identity" ]] || { err "找不到 age 私钥。"; return 1; }
+  (cd "$repo_tmp" && sha256sum -c "$file.sha256") || { err "部署清单 SHA256 校验失败。"; return 1; }
+  age -d -i "$identity" "$repo_tmp/$file" > "$temp/manifest.json" || { err "部署清单解密失败。"; return 1; }
+  echo "以下清单已经进行脱敏处理，秘密变量值不会显示："
+  cat "$temp/manifest.json"
+  echo
+  warn "清单用于手动复现 1Panel 应用配置，不包含 SMTP 密码、Admin Token 或其他秘密值。"
+  pause
+)
+
 show_logs() {
   if [[ -f "$LOG_FILE" ]]; then tail -n 100 "$LOG_FILE"; else warn "日志文件尚不存在：$LOG_FILE"; fi
   pause
@@ -772,16 +1188,14 @@ show_logs() {
 
 show_schedule_help() {
   cat <<'TXT'
-在 1Panel 中设置每日自动备份：
+推荐使用 Ubuntu/Debian 原生 systemd timer，不依赖 1Panel 计划任务。
+主菜单 9 安装/修改时间，10 查看状态，11 暂停，12 恢复。
+默认每天 05:20，按 VPS 系统本地时区运行；Persistent=true 可在 VPS 关机错过计划后，于下次启动补执行。
 
-1. 进入 1Panel → 计划任务 → 创建计划任务。
-2. 任务类型选择 Shell 脚本。
-3. 执行周期选择自定义 Cron：20 5 * * *
-4. 脚本内容填写：bash /usr/local/sbin/vw-backup.sh
-5. 执行用户选择 root（或具有 Docker 管理权限的用户）。
-6. 保存后先手动执行一次，并检查任务报告与 /var/log/vaultwarden-backup.log。
-
-不要同时再用 crontab 添加同一任务，以免重复备份。时间按 VPS 系统本地时区。
+若此前已经在 1Panel 创建同一时间的计划任务，请停用旧任务，避免重复备份。
+手动执行后台备份：systemctl start vw-backup.service
+查看运行日志：journalctl -u vw-backup.service -n 100
+查看脚本日志：tail -n 100 /var/log/vaultwarden-backup.log
 TXT
   pause
 }
@@ -793,23 +1207,36 @@ main_menu() {
     clear 2>/dev/null || true
     cat <<EOF
 ============================================================
- Vaultwarden 1Panel 交互式备份与恢复管理器  v${VERSION}
+ Vaultwarden 1Panel 备份与灾难恢复管理器  v${VERSION}
 ============================================================
-只管理 1Panel 应用商店安装的 Vaultwarden SQLite 数据。
-不会安装 Docker、Vaultwarden、HTTPS 或反向代理。
+1Panel 负责应用、Docker、HTTPS；本工具负责数据保护与恢复。
+自动备份使用 systemd timer，不依赖 1Panel 计划任务。
 
-  1) 首次配置 / 重新检测容器与数据目录
-  2) 立即备份当前数据并推送 GitHub
-  3) 从 GitHub 选择备份并恢复数据
-  4) 检查当前环境和备份配置
-  5) 查看最近备份日志
-  6) 查看 1Panel 每日 05:20 计划任务设置
-  7) 更新已安装的后台脚本（保留现有配置）
-  8) 验证 GitHub 上已有备份（SHA256 / age 解密 / SQLite）
-  0) 退出
+  [01] 首次配置 / 重新检测容器与数据目录
+  [02] 立即备份当前数据并推送 GitHub
+  [03] 从 GitHub 选择备份并恢复数据
+  [04] 检查当前环境和备份配置
+  [05] 查看最近备份日志
+  [06] 查看自动备份定时任务帮助
+  [07] 更新已安装的后台脚本（保留现有配置）
+  [08] 验证 GitHub 历史备份（SHA256 / age / SQLite）
+
+  [09] 安装 systemd 自动备份 / 修改执行时间
+  [10] 查看 systemd 定时任务状态
+  [11] 暂停自动备份
+  [12] 恢复自动备份
+  [13] 配置通知（Telegram / ntfy / Webhook）并发送测试
+  [14] Vaultwarden 更新前自动备份保护
+  [15] 生成系统诊断报告
+  [16] 历史备份管理（查看 / 永久保留 / 取消保留 / 删除）
+  [17] 查看加密部署清单
+  [18] 隔离恢复演练（临时容器启动，不连接生产网络、不修改生产数据）
+  [19] 配置备份策略（保留天数 / 磁盘阈值 / 推送重试）
+
+  [0] 退出
+============================================================
 EOF
-
-    read -r -p "请选择操作 [0-8]: " choice || exit 0
+    read -r -p "请选择操作 [0-19]: " choice || exit 0
     case "$choice" in
       1) configure_wizard || pause ;;
       2) run_backup_now || true ;;
@@ -819,10 +1246,20 @@ EOF
       6) show_schedule_help ;;
       7) update_installed_scripts || pause ;;
       8) verify_github_backup || pause ;;
+      9) install_systemd_timer || pause ;;
+      10) systemd_timer_status ;;
+      11) pause_systemd_timer || pause ;;
+      12) resume_systemd_timer || pause ;;
+      13) configure_notifications || pause ;;
+      14) preupgrade_backup || pause ;;
+      15) generate_diagnostics || pause ;;
+      16) manage_history || pause ;;
+      17) view_deployment_manifest || pause ;;
+      18) restore_rehearsal || pause ;;
+      19) configure_backup_policy || pause ;;
       0) echo "已退出。"; exit 0 ;;
       *) warn "无效选项。"; sleep 1 ;;
     esac
   done
 }
-
 main_menu "$@"
