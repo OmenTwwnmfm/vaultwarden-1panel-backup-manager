@@ -4,13 +4,22 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION="1.1.0"
+VERSION="1.2.1"
 CONFIG_FILE="/etc/vaultwarden-backup.conf"
 BACKUP_SCRIPT="/usr/local/sbin/vw-backup.sh"
 RESTORE_SCRIPT="/usr/local/sbin/vw-restore-prepare.sh"
 MANAGER_SCRIPT="/usr/local/sbin/vw-manager.sh"
 LOG_FILE="/var/log/vaultwarden-backup.log"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_LIB="$SCRIPT_DIR/vw-common.sh"
+if [[ ! -f "$COMMON_LIB" ]]; then COMMON_LIB="/usr/local/libexec/vw-common.sh"; fi
+if [[ -f "$COMMON_LIB" ]]; then
+  # shellcheck disable=SC1090
+  source "$COMMON_LIB"
+else
+  printf '[错误] 找不到共享检测库：%s\n' "$COMMON_LIB" >&2
+  exit 1
+fi
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
@@ -66,7 +75,7 @@ require_docker() {
 
 install_dependencies() {
   local missing=() pkg
-  for cmd in age git ssh-keygen ssh-keyscan sha256sum tar gzip flock; do
+  for cmd in age age-keygen git ssh-keygen ssh-keyscan sha256sum tar gzip flock sqlite3; do
     command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
   done
   if ((${#missing[@]} == 0)); then
@@ -81,7 +90,7 @@ install_dependencies() {
   confirm_yes "是否使用 apt 安装缺少的备份工具？" || { warn "已取消。"; return 1; }
   export DEBIAN_FRONTEND=noninteractive
   if ! apt-get update; then err "apt-get update 失败，请检查 VPS 软件源和网络。"; return 1; fi
-  if ! apt-get install -y age git openssh-client coreutils tar gzip util-linux findutils; then err "依赖安装失败。"; return 1; fi
+  if ! apt-get install -y age git openssh-client coreutils tar gzip util-linux findutils sqlite3; then err "依赖安装失败。"; return 1; fi
   ok "备份工具安装完成。"
 }
 
@@ -293,6 +302,33 @@ write_config() {
   rm -f "$tmp"
 }
 
+install_helper_scripts() {
+  local source_dir="$SCRIPT_DIR"
+  [[ -f "$source_dir/vw-common.sh" && -f "$source_dir/vw-backup.sh" && -f "$source_dir/vw-restore-prepare.sh" ]] || {
+    err "项目脚本不完整，缺少 vw-common.sh / vw-backup.sh / vw-restore-prepare.sh。"
+    return 1
+  }
+  install -d -o root -g root -m 755 /usr/local/libexec /usr/local/sbin
+  install -o root -g root -m 644 "$source_dir/vw-common.sh" /usr/local/libexec/vw-common.sh || return 1
+  install -o root -g root -m 700 "$source_dir/vw-backup.sh" "$BACKUP_SCRIPT" || return 1
+  install -o root -g root -m 700 "$source_dir/vw-restore-prepare.sh" "$RESTORE_SCRIPT" || return 1
+  install -o root -g root -m 700 "${BASH_SOURCE[0]}" "$MANAGER_SCRIPT" || return 1
+  ok "后台脚本已安装/更新："
+  echo "  /usr/local/libexec/vw-common.sh"
+  echo "  $BACKUP_SCRIPT"
+  echo "  $RESTORE_SCRIPT"
+  echo "  $MANAGER_SCRIPT"
+}
+
+update_installed_scripts() {
+  [[ -f "$CONFIG_FILE" ]] || { err "尚未完成首次配置，请先运行菜单 1。"; return 1; }
+  echo "将只更新管理器和后台脚本，不会修改 /etc/vaultwarden-backup.conf、age 公钥、SSH 密钥或 GitHub 仓库。"
+  confirm_yes_upper "确认安装当前项目目录中的新版脚本？" || { warn "已取消。"; return 0; }
+  install_helper_scripts || { err "脚本更新失败。"; return 1; }
+  ok "更新完成。下一次备份将自动重新检测 1Panel 当前容器名称及 /data 主机目录。"
+  pause
+}
+
 configure_wizard() {
   require_docker || return 1
   install_dependencies || return 1
@@ -387,13 +423,8 @@ configure_wizard() {
   chmod 700 "$backup_dir"
   init_or_clone_backup_repo "$github_repo" "$branch" "$repo_dir" "$ssh_key" || return 1
 
-  # Install the helper scripts from the same project directory.
-  [[ -f "$SCRIPT_DIR/vw-backup.sh" ]] || { err "未找到 vw-backup.sh：$SCRIPT_DIR"; return 1; }
-  [[ -f "$SCRIPT_DIR/vw-restore-prepare.sh" ]] || { err "未找到 vw-restore-prepare.sh：$SCRIPT_DIR"; return 1; }
-  install -o root -g root -m 700 "$SCRIPT_DIR/vw-backup.sh" "$BACKUP_SCRIPT" || { err "安装备份脚本失败。"; return 1; }
-  install -o root -g root -m 700 "$SCRIPT_DIR/vw-restore-prepare.sh" "$RESTORE_SCRIPT" || { err "安装恢复脚本失败。"; return 1; }
-  install -o root -g root -m 700 "${BASH_SOURCE[0]}" "$MANAGER_SCRIPT" || { err "安装交互式管理器失败。"; return 1; }
-  ok "配置已保存至 $CONFIG_FILE（权限 600），脚本已安装至 /usr/local/sbin。"
+  install_helper_scripts || { err "后台脚本安装失败。"; return 1; }
+  ok "配置已保存至 $CONFIG_FILE（权限 600），后台脚本已安装。"
   echo
   if [[ -f "$identity_default" ]]; then
     warn "age 私钥目前仍保存在本机：$identity_default。备份和定时任务只需要 age 公钥。"
@@ -407,34 +438,27 @@ configure_wizard() {
 check_configuration() {
   require_docker || return 1
   load_config || return 1
-  local status mount_source
   echo "========== 配置检查 =========="
-  printf '容器：%s\n' "$CONTAINER"
-  printf '数据目录：%s\n' "$DATA_DIR"
-  printf 'age 公钥：%s\n' "$AGE_RECIPIENT"
-  printf 'GitHub 仓库：%s\n' "$GITHUB_REPO"
-  printf 'GitHub 分支：%s\n' "$GITHUB_BRANCH"
-  printf '本地备份目录：%s\n' "$BACKUP_DIR"
-  printf 'Git 工作目录：%s\n' "$REPO_DIR"
-  if ! docker inspect "$CONTAINER" >/dev/null 2>&1; then err "容器不存在。"; return 1; fi
-  mount_source=$(docker inspect "$CONTAINER" --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}')
-  if [[ -z "$mount_source" ]]; then
-    err "容器没有发现挂载到 /data 的主机目录。"
+  printf '配置中记录的容器：%s\n配置中记录的数据目录：%s\n' "$CONTAINER" "$DATA_DIR"
+  if ! vw_find_target "$CONTAINER" "$DATA_DIR" true; then
+    err "无法自动确认唯一的运行中 Vaultwarden 容器。请运行菜单 1 重新选择。"
     return 1
   fi
-  if [[ "$(readlink -f "$mount_source")" != "$(readlink -f "$DATA_DIR")" ]]; then
-    err "容器 /data 挂载路径与配置中的 DATA_DIR 不一致。"
-    printf 'Docker 当前路径：%s\n配置路径：%s\n' "$mount_source" "$DATA_DIR"
-    return 1
+  if [[ "$CONTAINER" != "$VW_DETECTED_CONTAINER" || "$(readlink -f "$DATA_DIR")" != "$VW_DETECTED_DATA_DIR" ]]; then
+    warn "检测到 1Panel 可能重建过容器，正在更新记录。"
+    CONTAINER="$VW_DETECTED_CONTAINER"
+    DATA_DIR="$VW_DETECTED_DATA_DIR"
+    write_config "$CONTAINER" "$DATA_DIR" "$AGE_RECIPIENT" "$GITHUB_REPO" "$GITHUB_BRANCH" "$GITHUB_SSH_KEY" "$BACKUP_DIR" "$REPO_DIR" "$RETENTION_DAYS" "$MAX_FILE_MIB" "${AGE_IDENTITY_DEFAULT:-/root/vw-age-identity.txt}"
   fi
-  [[ -f "$DATA_DIR/db.sqlite3" ]] || { err "未找到 db.sqlite3。"; return 1; }
+  printf '当前容器：%s\n镜像：%s\n状态：%s\n/data 主机目录：%s\n' \
+    "$VW_DETECTED_CONTAINER" "$VW_DETECTED_IMAGE" "$VW_DETECTED_STATUS" "$VW_DETECTED_DATA_DIR"
+  [[ -s "$DATA_DIR/db.sqlite3" ]] || { err "db.sqlite3 不存在或大小为 0。"; return 1; }
   [[ "$AGE_RECIPIENT" == age1* ]] || { err "age 公钥格式错误。"; return 1; }
   [[ -f "$GITHUB_SSH_KEY" ]] || { err "SSH 私钥不存在：$GITHUB_SSH_KEY"; return 1; }
-  status=$(docker inspect -f '{{.State.Status}}' "$CONTAINER")
-  printf '容器状态：%s\n' "$status"
   printf '数据库大小：%s\n' "$(du -h "$DATA_DIR/db.sqlite3" | awk '{print $1}')"
+  printf '整个 /data 大小：%s\n' "$(du -sh "$DATA_DIR" | awk '{print $1}')"
   printf '数据目录剩余磁盘：%s\n' "$(df -h "$DATA_DIR" | awk 'NR==2 {print $4}')"
-  ok "本地配置与 /data 挂载检查通过。"
+  ok "本地数据路径及容器检查通过。"
   make_ssh_command "$GITHUB_SSH_KEY"
   if git ls-remote "$GITHUB_REPO" HEAD >/dev/null; then ok "GitHub SSH 仓库读取连接正常。"; else err "GitHub 仓库连接失败，请检查 Deploy Key 与仓库地址。"; return 1; fi
   pause
@@ -443,9 +467,10 @@ check_configuration() {
 run_backup_now() {
   [[ -x "$BACKUP_SCRIPT" ]] || { err "备份脚本尚未安装，请先运行菜单 1。"; return 1; }
   load_config || return 1
-  echo "将执行：停止指定 Vaultwarden 容器 → 备份整个 /data 并用 age 加密 → 启动容器 → 推送 GitHub。"
-  echo "容器：$CONTAINER"
-  echo "数据目录：$DATA_DIR"
+  echo "将执行：自动重新检测当前 Vaultwarden 容器与 /data 挂载 → 停止服务 → 完整备份并加密 → 启动服务 → 推送 GitHub。"
+  echo "上次记录容器：$CONTAINER"
+  echo "上次记录数据目录：$DATA_DIR"
+  echo "如果 1Panel 重建过容器，后台脚本会优先按原数据目录重新匹配，并将新容器名写回配置。"
   if ! confirm_yes_upper "此操作会使 Vaultwarden 短暂不可用。确认立即备份？"; then warn "已取消。"; return 0; fi
   local rc=0
   if bash "$BACKUP_SCRIPT"; then rc=0; else rc=$?; fi
@@ -670,6 +695,76 @@ restore_from_github() (
   pause
 )
 
+verify_github_backup() (
+  local temp_root="" repo_tmp="" restore_ssh_key="" identity="" identity_pub="" choice="" archive="" staging="" sqlite_result=""
+  cleanup_verify() {
+    [[ -n "${temp_root:-}" ]] && rm -rf -- "$temp_root"
+    [[ -n "${staging:-}" ]] && rm -rf -- "$staging"
+    return 0
+  }
+  trap cleanup_verify EXIT
+  require_root
+  load_config || return 1
+  [[ -x "$RESTORE_SCRIPT" ]] || { err "恢复准备脚本尚未安装，请先运行菜单 1 或菜单 7 更新脚本。"; return 1; }
+  if ! command -v sqlite3 >/dev/null 2>&1; then
+    warn "当前未安装 sqlite3；可选的数据库 quick_check 将跳过，但仍会检查 SHA256、age 解密和 tar 内容。"
+  fi
+  temp_root=$(mktemp -d /var/tmp/vw-verify.XXXXXX)
+  chmod 700 "$temp_root"
+  repo_tmp="$temp_root/repository"
+  restore_ssh_key=$(read_default "GitHub SSH 私钥路径" "$GITHUB_SSH_KEY")
+  [[ -f "$restore_ssh_key" ]] || { err "找不到 GitHub SSH 私钥：$restore_ssh_key"; return 1; }
+  echo "正在从 GitHub 读取备份列表..."
+  clone_for_restore "$GITHUB_REPO" "$GITHUB_BRANCH" "$repo_tmp" "$restore_ssh_key" || { err "无法克隆备份仓库。"; return 1; }
+  local -a archives=()
+  mapfile -t archives < <(find "$repo_tmp" -maxdepth 1 -type f -name 'vw-*.tar.gz.age' -printf '%f\n' | sort -r)
+  ((${#archives[@]} > 0)) || { err "GitHub 仓库中没有发现 vw-*.tar.gz.age。"; return 1; }
+  echo "可验证备份（按时间从新到旧）："
+  local i
+  for i in "${!archives[@]}"; do
+    printf '  %d) %s (%s)\n' "$((i+1))" "${archives[$i]}" "$(stat -c '%s bytes' "$repo_tmp/${archives[$i]}")"
+  done
+  read -r -p "请输入要验证的备份编号: " choice
+  [[ "$choice" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= ${#archives[@]})) || { err "编号无效。"; return 1; }
+  archive="$repo_tmp/${archives[$((choice-1))]}"
+  [[ -s "$archive" && -s "$archive.sha256" ]] || { err "备份文件或 SHA256 文件不存在/为空。"; return 1; }
+  echo
+  echo "第 1 项：SHA256 校验"
+  (cd "$repo_tmp" && sha256sum -c "$(basename "$archive").sha256") || { err "SHA256 校验失败。"; return 1; }
+  echo
+  echo "第 2 项：验证 age 私钥"
+  identity=$(read_default "原 age 私钥文件路径（必须与此备份匹配）" "${AGE_IDENTITY_DEFAULT:-/root/vw-age-identity.txt}")
+  [[ -f "$identity" ]] || { err "找不到 age 私钥：$identity"; return 1; }
+  identity_pub=$(age-keygen -y "$identity") || { err "无法读取 age 私钥。"; return 1; }
+  [[ "$identity_pub" == "$AGE_RECIPIENT" ]] || { err "该私钥对应的公钥与当前配置不匹配。"; return 1; }
+  echo
+  echo "第 3 项：实际解密、读取归档目录"
+  staging="$temp_root/staging"
+  bash "$RESTORE_SCRIPT" "$archive" "$identity" "$staging" || { err "解密或归档检查失败。"; return 1; }
+  echo
+  echo "第 4 项：检查关键数据文件"
+  [[ -s "$staging/data/db.sqlite3" ]] || { err "数据库缺失或为空。"; return 1; }
+  printf 'db.sqlite3：%s bytes\n' "$(stat -c '%s' "$staging/data/db.sqlite3")"
+  for item in attachments sends config.json rsa_key.pem rsa_key.pub; do
+    if [[ -e "$staging/data/$item" ]]; then
+      printf '发现：%s\n' "$item"
+    fi
+  done
+  if command -v sqlite3 >/dev/null 2>&1; then
+    echo "第 5 项：SQLite quick_check"
+    sqlite_result=$(sqlite3 -readonly "$staging/data/db.sqlite3" 'PRAGMA quick_check;' 2>&1) || { err "SQLite quick_check 执行失败：$sqlite_result"; return 1; }
+    [[ "$sqlite_result" == "ok" ]] || { err "SQLite 检查未返回 ok：$sqlite_result"; return 1; }
+    ok "SQLite quick_check：OK"
+  else
+    warn "跳过 SQLite quick_check（未安装 sqlite3），但文件解密和 tar 读取已通过。"
+  fi
+  echo
+  ok "备份验证通过：SHA256、age 解密、tar 读取和数据库文件检查均成功。"
+  echo "这只是离线数据可读性测试，不会停止或修改当前 Vaultwarden。"
+  echo "验证文件：$(basename "$archive")"
+  pause
+)
+
 show_logs() {
   if [[ -f "$LOG_FILE" ]]; then tail -n 100 "$LOG_FILE"; else warn "日志文件尚不存在：$LOG_FILE"; fi
   pause
@@ -709,10 +804,12 @@ main_menu() {
   4) 检查当前环境和备份配置
   5) 查看最近备份日志
   6) 查看 1Panel 每日 05:20 计划任务设置
+  7) 更新已安装的后台脚本（保留现有配置）
+  8) 验证 GitHub 上已有备份（SHA256 / age 解密 / SQLite）
   0) 退出
 EOF
 
-    read -r -p "请选择操作 [0-6]: " choice || exit 0
+    read -r -p "请选择操作 [0-8]: " choice || exit 0
     case "$choice" in
       1) configure_wizard || pause ;;
       2) run_backup_now || true ;;
@@ -720,6 +817,8 @@ EOF
       4) check_configuration || pause ;;
       5) show_logs ;;
       6) show_schedule_help ;;
+      7) update_installed_scripts || pause ;;
+      8) verify_github_backup || pause ;;
       0) echo "已退出。"; exit 0 ;;
       *) warn "无效选项。"; sleep 1 ;;
     esac

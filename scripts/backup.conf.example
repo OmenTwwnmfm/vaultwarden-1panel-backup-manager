@@ -1,8 +1,8 @@
 # 复制为 /etc/vaultwarden-backup.conf 后填写真实信息；不要把真实配置上传到 GitHub。
-# CONTAINER：docker ps 输出中的 Vaultwarden 容器名称。
+# CONTAINER：首次识别到的容器名称。新版本每次备份都会重新发现；1Panel 重建容器后会自动更新。
 CONTAINER="1Panel-Vaultwarden-实际容器名"
 
-# DATA_DIR：docker inspect 中 Destination=/data 对应的主机 Source 路径。
+# DATA_DIR：docker inspect 中 Destination=/data 对应的主机 Source 路径。新版本每次备份都会核对并自动更新。
 # 绝对不要猜路径，也不要填写容器内部的 /data。
 DATA_DIR="/请替换为实际主机数据目录"
 
