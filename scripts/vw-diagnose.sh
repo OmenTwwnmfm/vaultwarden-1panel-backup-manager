@@ -72,3 +72,8 @@ if [[ -f /var/log/vaultwarden-backup.log ]]; then
   tail -n 60 /var/log/vaultwarden-backup.log
 fi
 echo; echo "Diagnostic report saved: $OUT"
+
+if [[ -f /var/lib/vaultwarden-backup/performance.tsv ]]; then
+  echo; echo "Recent performance records (last 20 rows):"
+  tail -n 20 /var/lib/vaultwarden-backup/performance.tsv || true
+fi

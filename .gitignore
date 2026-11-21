@@ -41,3 +41,7 @@ __pycache__/
 
 # User-facing project documentation is Markdown only
 *.docx
+
+# Runtime performance history (never commit server telemetry)
+performance.tsv
+*.csv

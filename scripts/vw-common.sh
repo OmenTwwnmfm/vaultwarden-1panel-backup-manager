@@ -143,3 +143,88 @@ except Exception as exc:
     sys.exit(0)
 PY
 }
+
+
+# ---- Performance metrics -------------------------------------------------
+# TSV format: timestamp, operation, run_id, stage, duration_ms, status, bytes
+VW_PERF_FILE_DEFAULT="/var/lib/vaultwarden-backup/performance.tsv"
+
+vw_perf_now_ms() {
+  local ns
+  ns=$(date +%s%N 2>/dev/null || true)
+  if [[ "$ns" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$((ns / 1000000))"
+  else
+    printf '%s' "$(( $(date +%s) * 1000 ))"
+  fi
+}
+
+vw_perf_init() {
+  local operation="$1" run_id="$2" file="${VW_PERF_FILE:-$VW_PERF_FILE_DEFAULT}"
+  mkdir -p "$(dirname "$file")" /run/lock
+  touch "$file"
+  chmod 600 "$file"
+  if [[ ! -s "$file" ]]; then
+    printf 'timestamp\toperation\trun_id\tstage\tduration_ms\tstatus\tbytes\n' >> "$file"
+  fi
+  VW_PERF_FILE="$file"
+  VW_PERF_OPERATION="$operation"
+  VW_PERF_RUN_ID="$run_id"
+  VW_PERF_TOTAL_START_MS=$(vw_perf_now_ms)
+  VW_PERF_STAGE_START_MS=""
+  VW_PERF_CURRENT_STAGE=""
+  VW_PERF_STARTED=1
+  VW_PERF_FINISHED=0
+  export VW_PERF_FILE VW_PERF_OPERATION VW_PERF_RUN_ID VW_PERF_TOTAL_START_MS VW_PERF_STARTED VW_PERF_FINISHED
+}
+
+vw_perf_append_row() {
+  local stage="$1" duration_ms="$2" status="$3" bytes="${4:-0}"
+  local lock_file="/run/lock/vaultwarden-performance.lock"
+  mkdir -p /run/lock "$(dirname "${VW_PERF_FILE:-$VW_PERF_FILE_DEFAULT}")"
+  exec 7>"$lock_file"
+  flock 7
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$(date '+%F %T %Z')" \
+    "${VW_PERF_OPERATION:-unknown}" \
+    "${VW_PERF_RUN_ID:-unknown}" \
+    "$stage" "$duration_ms" "$status" "$bytes" >> "${VW_PERF_FILE:-$VW_PERF_FILE_DEFAULT}"
+  flock -u 7
+  exec 7>&-
+}
+
+vw_perf_stage_begin() {
+  [[ "${VW_PERF_STARTED:-0}" == 1 && "${VW_PERF_FINISHED:-0}" != 1 ]] || return 0
+  if [[ -n "${VW_PERF_CURRENT_STAGE:-}" ]]; then
+    vw_perf_stage_end interrupted 0
+  fi
+  VW_PERF_CURRENT_STAGE="$1"
+  VW_PERF_STAGE_START_MS=$(vw_perf_now_ms)
+}
+
+vw_perf_stage_end() {
+  local status="${1:-success}" bytes="${2:-0}" now elapsed
+  [[ -n "${VW_PERF_CURRENT_STAGE:-}" ]] || return 0
+  now=$(vw_perf_now_ms)
+  elapsed=$((now - ${VW_PERF_STAGE_START_MS:-now}))
+  (( elapsed < 0 )) && elapsed=0
+  vw_perf_append_row "$VW_PERF_CURRENT_STAGE" "$elapsed" "$status" "$bytes"
+  printf '[耗时] %-28s %8.3f 秒 (%s)\n' "$VW_PERF_CURRENT_STAGE" "$(awk -v ms="$elapsed" 'BEGIN{printf "%.3f",ms/1000}')" "$status"
+  VW_PERF_CURRENT_STAGE=""
+  VW_PERF_STAGE_START_MS=""
+}
+
+vw_perf_finish() {
+  local status="${1:-success}" now elapsed
+  [[ "${VW_PERF_STARTED:-0}" == 1 && "${VW_PERF_FINISHED:-0}" != 1 ]] || return 0
+  if [[ -n "${VW_PERF_CURRENT_STAGE:-}" ]]; then
+    vw_perf_stage_end "$status" 0
+  fi
+  now=$(vw_perf_now_ms)
+  elapsed=$((now - ${VW_PERF_TOTAL_START_MS:-now}))
+  (( elapsed < 0 )) && elapsed=0
+  vw_perf_append_row TOTAL "$elapsed" "$status" "${VW_PERF_ARTIFACT_BYTES:-0}"
+  printf '[耗时] %-28s %8.3f 秒 (%s)\n' "TOTAL ${VW_PERF_OPERATION:-operation}" "$(awk -v ms="$elapsed" 'BEGIN{printf "%.3f",ms/1000}')" "$status"
+  VW_PERF_FINISHED=1
+  export VW_PERF_FINISHED
+}

@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION="1.3.1"
+VERSION="1.4.0"
 CONFIG_FILE="/etc/vaultwarden-backup.conf"
 BACKUP_SCRIPT="/usr/local/sbin/vw-backup.sh"
 RESTORE_SCRIPT="/usr/local/sbin/vw-restore-prepare.sh"
@@ -331,7 +331,7 @@ write_config() {
 
 install_helper_scripts() {
   local source_dir="$SCRIPT_DIR"
-  [[ -f "$source_dir/vw-common.sh" && -f "$source_dir/vw-backup.sh" && -f "$source_dir/vw-restore-prepare.sh" && -f "$source_dir/vw-manifest.py" && -f "$source_dir/vw-diagnose.sh" ]] || {
+  [[ -f "$source_dir/vw-common.sh" && -f "$source_dir/vw-backup.sh" && -f "$source_dir/vw-restore-prepare.sh" && -f "$source_dir/vw-manifest.py" && -f "$source_dir/vw-diagnose.sh" && -f "$source_dir/vw-performance.py" && -f "$source_dir/vbm-launcher.sh" ]] || {
     err "项目脚本不完整，缺少 vw-common.sh / vw-backup.sh / vw-restore-prepare.sh。"
     return 1
   }
@@ -341,7 +341,23 @@ install_helper_scripts() {
   install -o root -g root -m 700 "$source_dir/vw-restore-prepare.sh" "$RESTORE_SCRIPT" || return 1
   install -o root -g root -m 755 "$source_dir/vw-manifest.py" /usr/local/libexec/vw-manifest.py || return 1
   install -o root -g root -m 700 "$source_dir/vw-diagnose.sh" /usr/local/sbin/vw-diagnose.sh || return 1
+  install -o root -g root -m 755 "$source_dir/vw-performance.py" /usr/local/libexec/vw-performance.py || return 1
   install -o root -g root -m 700 "${BASH_SOURCE[0]}" "$MANAGER_SCRIPT" || return 1
+  local project_root launcher_tmp
+  project_root=$(readlink -f -- "$source_dir/..")
+  [[ -f "$project_root/run.sh" ]] || { err "找不到项目 run.sh，无法安装全局命令 vbm。"; return 1; }
+  install -d -o root -g root -m 755 /usr/local/bin
+  launcher_tmp=$(mktemp)
+  python3 - "$source_dir/vbm-launcher.sh" "$launcher_tmp" "$project_root/run.sh" <<'PYVBM'
+from pathlib import Path
+import shlex, sys
+source, target, runner = sys.argv[1:]
+content = Path(source).read_text(encoding="utf-8")
+content = content.replace("__VBM_PROJECT_RUNNER__", shlex.quote(runner))
+Path(target).write_text(content, encoding="utf-8")
+PYVBM
+  install -o root -g root -m 755 "$launcher_tmp" /usr/local/bin/vbm
+  rm -f "$launcher_tmp"
   install -d -o root -g root -m 755 /etc/logrotate.d
   install -o root -g root -m 644 "$(dirname "$source_dir")/logrotate-vaultwarden-backup" /etc/logrotate.d/vaultwarden-backup || return 1
   ok "后台脚本已安装/更新："
@@ -350,16 +366,18 @@ install_helper_scripts() {
   echo "  $BACKUP_SCRIPT"
   echo "  $RESTORE_SCRIPT"
   echo "  /usr/local/sbin/vw-diagnose.sh"
+  echo "  /usr/local/libexec/vw-performance.py"
   echo "  $MANAGER_SCRIPT"
+  echo "  /usr/local/bin/vbm（全局启动命令）"
   echo "  /etc/logrotate.d/vaultwarden-backup"
 }
 
 update_installed_scripts() {
   [[ -f "$CONFIG_FILE" ]] || { err "尚未完成首次配置，请先运行菜单 1。"; return 1; }
-  echo "将更新管理器、备份/恢复/诊断工具及公共库，不会修改 /etc/vaultwarden-backup.conf、age 公钥、SSH 密钥或 GitHub 仓库。若 systemd timer 已安装，timer 文件会保留。"
+  echo "将更新管理器、备份/恢复/诊断/性能工具、全局 vbm 命令及公共库，不会修改 /etc/vaultwarden-backup.conf、age 公钥、SSH 密钥或 GitHub 仓库。若 systemd timer 已安装，timer 文件会保留。"
   confirm_yes_upper "确认安装当前项目目录中的新版脚本？" || { warn "已取消。"; return 0; }
   install_helper_scripts || { err "脚本更新失败。"; return 1; }
-  ok "更新完成。下一次备份将自动重新检测 1Panel 当前容器名称及 /data 主机目录。"
+  ok "更新完成。全局命令 vbm 已安装/更新；下一次备份将自动重新检测 1Panel 当前容器名称及 /data 主机目录。"
   pause
 }
 
@@ -525,6 +543,7 @@ restore_from_github() (
   # user interrupts the operation or an unexpected command fails.
   local temp_root="" staging="" container="" stopped_by_script=0 data_change_started=0
   cleanup_restore() {
+    local restore_rc=$?
     if [[ "${stopped_by_script:-0}" == "1" && -n "${container:-}" ]]; then
       if [[ "${data_change_started:-0}" == "1" ]]; then
         echo "严重提醒：恢复过程中断，数据目录可能处于恢复中间状态。为避免使用不完整数据，容器保持停止。" >&2
@@ -537,6 +556,9 @@ restore_from_github() (
     fi
     [[ -n "${staging:-}" ]] && rm -rf -- "$staging"
     [[ -n "${temp_root:-}" ]] && rm -rf -- "$temp_root"
+    if [[ "${VW_PERF_STARTED:-0}" == 1 && "${VW_PERF_FINISHED:-0}" != 1 ]]; then
+      if (( restore_rc == 0 )); then vw_perf_finish success; else vw_perf_finish failed; fi
+    fi
     return 0
   }
   trap cleanup_restore EXIT
@@ -556,6 +578,9 @@ restore_from_github() (
   temp_root=$(mktemp -d /var/tmp/vw-github-restore.XXXXXX)
   chmod 700 "$temp_root"
   repo_tmp="$temp_root/repository"
+  timestamp=$(date '%Y%m%d-%H%M%S')
+  vw_perf_init restore "$timestamp-$$"
+  vw_perf_stage_begin "github_clone_and_list"
 
   echo "========== 第 1 步：从 GitHub 获取备份列表 =========="
   restore_ssh_key=$(read_default "读取 GitHub 私有仓库的 SSH 私钥路径" "$GITHUB_SSH_KEY")
@@ -566,6 +591,7 @@ restore_from_github() (
     rm -rf -- "$temp_root"
     return 1
   fi
+  vw_perf_stage_end success
 
   local -a archives=()
   mapfile -t archives < <(find "$repo_tmp" -maxdepth 1 -type f -name 'vw-*.tar.gz.age' -printf '%f\n' | sort -r)
@@ -597,16 +623,19 @@ restore_from_github() (
   timestamp=$(date '+%Y%m%d-%H%M%S')
   staging="/var/lib/vaultwarden-restore-staging-$timestamp"
   if [[ -e "$staging" ]]; then err "暂存目录已存在：$staging"; rm -rf -- "$temp_root"; return 1; fi
+  vw_perf_stage_begin "restore_decrypt_validate"
   if ! bash "$RESTORE_SCRIPT" "$archive" "$identity" "$staging"; then
     err "校验或解密失败。原 Vaultwarden 数据尚未修改。"
     rm -rf -- "$staging" "$temp_root"
     return 1
   fi
   ok "已解密并暂存到：$staging/data"
+  vw_perf_stage_end success
 
   echo
   echo "========== 第 4 步：检查恢复目标 =========="
   if ! list_vaultwarden_containers; then rm -rf -- "$staging" "$temp_root"; return 1; fi
+  vw_perf_stage_begin "restore_target_preflight"
   container="$DETECTED_CONTAINER"
   if ! inspect_data_mount "$container"; then rm -rf -- "$staging" "$temp_root"; return 1; fi
   data_dir="$DETECTED_DATA_DIR"
@@ -620,6 +649,7 @@ restore_from_github() (
   chmod 700 "$BACKUP_DIR"
   rollback_archive="$BACKUP_DIR/pre-restore-${timestamp}.tar.gz.age"
   if [[ -e "$rollback_archive" ]]; then err "恢复前快照文件已存在：$rollback_archive"; return 1; fi
+  vw_perf_stage_end success
 
   echo
   printf '选中的备份：%s\n目标容器：%s\n当前容器状态：%s\n将恢复到的数据目录：%s\n当前数据加密留存到：%s\n' \
@@ -630,6 +660,7 @@ restore_from_github() (
     return 0
   fi
 
+  vw_perf_stage_begin "pre_restore_rollback_snapshot"
   local was_running=0 rollback_ok=0
   [[ "$container_state" == "running" ]] && was_running=1
   if ((was_running == 1)); then
@@ -669,6 +700,9 @@ restore_from_github() (
     fi
     return 1
   fi
+
+  vw_perf_stage_end success
+  vw_perf_stage_begin "replace_production_data"
 
   # Keep the Docker bind/named-volume mountpoint itself intact. Only replace its
   # contents, so Docker/1Panel continues mounting the same Source path.
@@ -711,6 +745,8 @@ restore_from_github() (
     return 1
   fi
   data_change_started=0
+  vw_perf_stage_end success
+  vw_perf_stage_begin "container_start_health_check"
 
   ok "数据恢复文件已复制完成。原数据的加密回滚快照保留在：$rollback_archive"
   start_choice="yes"
@@ -744,6 +780,7 @@ restore_from_github() (
     warn "已按你的选择保持容器停止。稍后可在 1Panel → 已安装应用中手动启动。"
   fi
   warn "请登录网页测试原用户、附件、TOTP 与同步。确认一切正常之前，不要删除原数据加密回滚快照：$rollback_archive"
+  vw_perf_stage_end success
   ok "恢复暂存目录将在退出菜单时自动清理。"
   pause
 )
@@ -1208,6 +1245,43 @@ view_deployment_manifest() (
   pause
 )
 
+performance_monitor() {
+  local tool="$SCRIPT_DIR/vw-performance.py" choice
+  [[ -f "$tool" ]] || tool="/usr/local/libexec/vw-performance.py"
+  [[ -f "$tool" ]] || { err "找不到性能分析工具，请从项目目录运行菜单 07 更新脚本。"; pause; return 1; }
+  while true; do
+    clear 2>/dev/null || true
+    echo "╭──────────────────────────────────────────────────────────────╮"
+    echo "│             性能监控与执行耗时分析                           │"
+    echo "├──────────────────────────────────────────────────────────────┤"
+    echo "│ [1] 查看总体摘要与最近 20 次操作                              │"
+    echo "│ [2] 查看最近阶段耗时明细                     │"
+    echo "│ [3] 查看指定运行 ID 的详细阶段耗时                            │"
+    echo "│ [4] 导出完整 CSV 性能记录                                     │"
+    echo "│ [0] 返回主菜单                                                │"
+    echo "╰──────────────────────────────────────────────────────────────╯"
+    read -r -p "请选择 [0-4]: " choice || return 0
+    case "$choice" in
+      1) python3 "$tool" /var/lib/vaultwarden-backup/performance.tsv; pause ;;
+      2) python3 "$tool" /var/lib/vaultwarden-backup/performance.tsv --recent; pause ;;
+      3)
+        read -r -p "输入运行 ID（可从最近运行列表复制）: " run_id
+        [[ -n "$run_id" ]] && python3 "$tool" /var/lib/vaultwarden-backup/performance.tsv --details "$run_id"
+        pause
+        ;;
+      4)
+        local out="/var/backups/vaultwarden/performance-$(date +%Y%m%d-%H%M%S).csv"
+        mkdir -p "$(dirname "$out")"; chmod 700 "$(dirname "$out")"
+        python3 "$tool" /var/lib/vaultwarden-backup/performance.tsv --csv "$out"
+        chmod 600 "$out" 2>/dev/null || true
+        pause
+        ;;
+      0|00) return 0 ;;
+      *) warn "无效选项。"; sleep 1 ;;
+    esac
+  done
+}
+
 show_logs() {
   if [[ -f "$LOG_FILE" ]]; then tail -n 100 "$LOG_FILE"; else warn "日志文件尚不存在：$LOG_FILE"; fi
   pause
@@ -1271,10 +1345,13 @@ main_menu() {
 │  06 · 策略设置                                                       │
 │      [19] 配置备份策略（保留天数 / 磁盘阈值 / 推送重试）             │
 ├──────────────────────────────────────────────────────────────────────┤
+│  07 · 性能监控                                                       │
+│      [20] 性能监控与执行耗时分析（备份 / 恢复 / GitHub / 校验）      │
+├──────────────────────────────────────────────────────────────────────┤
 │      [00] 退出                                                       │
 ╰──────────────────────────────────────────────────────────────────────╯
 EOF
-    read -r -p "请选择操作 [00-19]: " choice || exit 0
+    read -r -p "请选择操作 [00-20]: " choice || exit 0
     case "$choice" in
       1|01) configure_wizard || pause ;;
       2|02) run_backup_now || true ;;
@@ -1295,8 +1372,9 @@ EOF
       17) view_deployment_manifest || pause ;;
       18) restore_rehearsal || pause ;;
       19) configure_backup_policy || pause ;;
+      20|020) performance_monitor ;;
       0|00) echo "已退出。"; exit 0 ;;
-      *) warn "无效选项，请输入 00-19。"; sleep 1 ;;
+      *) warn "无效选项，请输入 00-20。"; sleep 1 ;;
     esac
   done
 }

@@ -10,7 +10,7 @@
 ![Panel](https://img.shields.io/badge/panel-1Panel-1677ff)
 ![Encryption](https://img.shields.io/badge/encryption-age-16a34a)
 ![Scheduler](https://img.shields.io/badge/scheduler-systemd-6d28d9)
-![Version](https://img.shields.io/badge/version-1.3.1-blue)
+![Version](https://img.shields.io/badge/version-1.4.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 </div>
@@ -26,6 +26,21 @@ Vaultwarden 将用户密码库保存在自己的服务器上，因此需要可�
 > **源码仓库与备份仓库必须分离。** 本仓库仅放项目代码和文档。另建一个 GitHub Private 仓库保存 `.age` 加密备份。不要把数据库、附件、age 私钥、SSH 私钥、真实配置文件或其他凭据提交到源码仓库。
 
 ## 功能特点
+
+### 性能监控与执行耗时分析
+
+- **阶段级计时**：分别记录容器发现/预检查、部署清单生成、快照与加密、容器启动健康检查、本地校验、GitHub 同步/推送/远端核验等阶段。
+- **恢复过程计时**：记录 GitHub 获取、解密与校验、恢复目标检查、恢复前回滚快照、生产数据替换、容器启动与健康检查。
+- **历史趋势**：汇总最近 20 次操作，按最近 30 次操作计算各阶段平均耗时与最大耗时，帮助判断瓶颈是在 VPS 磁盘/CPU 还是 GitHub 网络。
+- **CSV 导出**：可将性能历史导出为 CSV，便于用 Excel 分析。
+- **隐私保护**：性能记录只包含时间、操作类型、运行 ID、阶段、耗时、状态和字节数，不保存密码、Token、私钥或数据库内容。
+- 记录文件：`/var/lib/vaultwarden-backup/performance.tsv`，权限为 root 专用。
+
+### 全局快捷命令
+
+- 完成首次配置（菜单 01）或执行后台脚本更新（菜单 07）后，会安装 `/usr/local/bin/vbm`。
+- 之后在任意目录执行 `vbm` 即可进入交互式管理菜单；普通用户执行时会通过 sudo 请求管理员权限。
+- `vbm` 指向当初克隆的项目目录，因此更新前先在项目目录 `git pull`，再运行 `vbm` 菜单 07 更新后台脚本。
 
 ### 自动备份与完整性
 
@@ -90,6 +105,8 @@ Vaultwarden_1Panel_GitHub_Project/
 │   ├── vw-restore-prepare.sh        # 校验、解密、暂存及 SQLite 检查
 │   ├── vw-manifest.py               # 生成已脱敏的部署清单
 │   ├── vw-diagnose.sh               # 生成脱敏诊断报告
+│   ├── vw-performance.py            # 性能历史汇总、明细与 CSV 导出
+│   ├── vbm-launcher.sh              # 全局 vbm 命令安装模板
 │   └── backup.conf.example          # 配置字段参考
 └── docs/
     ├── 快速开始.md
@@ -103,7 +120,7 @@ Vaultwarden_1Panel_GitHub_Project/
 
 | 仓库 | 可见性 | 用途 |
 |---|---|---|
-| 本项目源码仓库 | Public 或 Private | README、脚本、文档 |
+| 本项目源码仓库 | **Public** | README、脚本、文档；任何人均可匿名 HTTPS 克隆 |
 | Vaultwarden 备份仓库 | **Private** | 仅保存 age 加密备份、清单和 SHA256 文件 |
 
 建议备份仓库保持空仓库，不要先添加 README、License 或 `.gitignore`。管理器首次配置时会初始化或克隆它。
@@ -115,12 +132,20 @@ Vaultwarden_1Panel_GitHub_Project/
 ```bash
 sudo apt update
 sudo apt install -y git
-sudo git clone https://github.com/你的用户名/vaultwarden-1panel-backup-manager.git /opt/vaultwarden-1panel-backup-manager
+sudo git clone https://github.com/OmenTwwnmfm/vaultwarden-1panel-backup-manager.git /opt/vaultwarden-1panel-backup-manager
 cd /opt/vaultwarden-1panel-backup-manager
 sudo bash ./run.sh
 ```
 
-如果源码仓库是 Private，先为 VPS 配置只读访问权限。首次配置需要交互式终端，不要通过 systemd 或后台脚本启动配置向导。
+完成首次配置（菜单 01）或执行后台脚本更新（菜单 07）后，系统会创建全局命令：
+
+```bash
+vbm
+```
+
+之后无论当前位于哪个目录，都可以执行 `vbm` 进入菜单。
+
+本项目源码仓库为 Public，任何人都可以通过 HTTPS 克隆，不需要 GitHub 账号、SSH 密钥或 Token。只有独立的数据备份仓库必须保持 Private。首次配置需要交互式终端，不要通过 systemd 或后台脚本启动配置向导。
 
 ### 3. 首次配置
 
@@ -233,7 +258,13 @@ tail -n 100 /var/log/vaultwarden-backup.log
 |---|---|
 | 19 | 配置备份策略（保留天数 / 磁盘阈值 / 推送重试） |
 
-输入 `00` 或 `0` 退出。详细操作见 [`docs/完整使用手册.md`](docs/完整使用手册.md)。
+### 07 · 性能监控
+
+| 编号 | 功能 |
+|---|---|
+| 20 | 性能监控与执行耗时分析（备份 / 恢复 / GitHub / 校验） |
+
+输入 `00` 或 `0` 退出。性能记录保存在 `/var/lib/vaultwarden-backup/performance.tsv`；通过菜单 20 可查看最近运行、阶段平均/最大耗时、指定运行详情并导出 CSV。总耗时包含交互式等待，定位纯处理瓶颈时应重点比较各阶段耗时。详细操作见 [`docs/完整使用手册.md`](docs/完整使用手册.md)。
 
 ## 通知配置
 
@@ -307,6 +338,20 @@ tail -n 100 /var/log/vaultwarden-backup.log
 - [快速开始](docs/快速开始.md)
 - [完整使用手册](docs/完整使用手册.md)
 - [部署信息记录模板](docs/部署信息记录模板.md)
+
+## 性能数据
+
+性能模块使用 `/var/lib/vaultwarden-backup/performance.tsv` 保存阶段耗时。每次手动或 systemd 备份、交互式恢复会记录总耗时和阶段耗时。菜单 20 可查看摘要、按运行 ID 查看阶段明细，或导出 CSV。性能数据不包含秘密配置值。
+
+## 全局命令 `vbm`
+
+在首次配置（菜单 01）或菜单 07 更新脚本时，管理器会在 `/usr/local/bin/vbm` 安装一个启动器。此后在任意工作目录执行：
+
+```bash
+vbm
+```
+
+即可打开交互式菜单。若系统 PATH 不包含 `/usr/local/bin`，请检查 shell 的 PATH；也可以执行 `/usr/local/bin/vbm`。全局命令指向克隆的项目目录，请勿删除该目录。
 
 ## License
 

@@ -49,6 +49,8 @@ done
 [[ "$GIT_PUSH_RETRIES" =~ ^[0-9]+$ ]] && (( GIT_PUSH_RETRIES >= 1 && GIT_PUSH_RETRIES <= 10 )) || { echo "ERROR: GIT_PUSH_RETRIES must be 1..10."; exit 1; }
 
 TIMESTAMP=$(date '+%Y%m%d-%H%M%S')
+vw_perf_init backup "$TIMESTAMP"
+vw_perf_stage_begin "container_discovery_preflight"
 FILENAME="vw-${TIMESTAMP}.tar.gz.age"
 MANIFEST_FILENAME="vw-${TIMESTAMP}.manifest.json.age"
 OUTPUT="$BACKUP_DIR/$FILENAME"
@@ -104,6 +106,9 @@ on_exit() {
     fi
   fi
   [[ -n "${TMP_ROOT:-}" && -d "$TMP_ROOT" ]] && rm -rf -- "$TMP_ROOT"
+  if [[ "${VW_PERF_STARTED:-0}" == 1 && "${VW_PERF_FINISHED:-0}" != 1 ]]; then
+    if (( rc == 0 )); then vw_perf_finish success; else vw_perf_finish failed; fi
+  fi
   if (( rc != 0 )); then
     if [[ "${ARCHIVE_VALIDATED:-0}" != 1 && "${PRESERVE_LOCAL_ARTIFACT:-0}" != 1 ]]; then
       [[ -n "${OUTPUT:-}" ]] && rm -f -- "$OUTPUT" "$OUTPUT.sha256"
@@ -157,9 +162,14 @@ git -C "$REPO_DIR" config user.email "vaultwarden-backup@localhost"
 printf -v GIT_SSH_COMMAND 'ssh -i %q -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/root/.ssh/known_hosts' "$GITHUB_SSH_KEY"
 export GIT_SSH_COMMAND
 
+vw_perf_stage_end success
+vw_perf_stage_begin "manifest_generation"
+
 # Capture sanitized deployment information before stopping the container.
 MANIFEST_PLAIN="$TMP_ROOT/deployment-manifest.json"
 if ! python3 "$MANIFEST_TOOL" "$CONTAINER" "$MANIFEST_PLAIN"; then FAILURE_REASON="could not create sanitized deployment manifest"; exit 1; fi
+vw_perf_stage_end success
+vw_perf_stage_begin "snapshot_stop_sqlite_tar_age"
 
 # Snapshot the whole /data mount while the app is stopped. All SQLite DB/WAL/SHM
 # files and attachments therefore belong to one consistent point in time.
@@ -178,11 +188,16 @@ echo "Creating encrypted complete /data snapshot..."
 if ! tar --numeric-owner -czpf - -C "$DATA_DIR" . | age -r "$AGE_RECIPIENT" -o "$OUTPUT"; then FAILURE_REASON="tar/gzip/age pipeline failed"; exit 1; fi
 [[ -s "$OUTPUT" ]] || { FAILURE_REASON="encrypted archive is empty"; exit 1; }
 
+vw_perf_stage_end success "$(stat -c '%s' "$OUTPUT")"
+vw_perf_stage_begin "container_restart_health"
+
 # Start the service immediately after snapshot generation, before Git/network work.
 echo "Encrypted snapshot created. Restarting Vaultwarden before network upload..."
 if ! docker start "$CONTAINER" >/dev/null; then FAILURE_REASON="snapshot made but docker start failed"; exit 1; fi
 STOPPED=0
 if ! wait_container_healthy "$CONTAINER"; then FAILURE_REASON="container did not become healthy after snapshot"; exit 1; fi
+vw_perf_stage_end success
+vw_perf_stage_begin "local_validation_manifest_checksum"
 
 echo "Vaultwarden is running; continuing offline validation and GitHub upload."
 HEADER=$(head -n 1 "$OUTPUT" 2>/dev/null || true)
@@ -224,6 +239,8 @@ if ! age -r "$AGE_RECIPIENT" -o "$MANIFEST_OUTPUT" "$MANIFEST_PLAIN"; then FAILU
 (cd "$BACKUP_DIR" && sha256sum "$FILENAME" > "$FILENAME.sha256" && sha256sum "$MANIFEST_FILENAME" > "$MANIFEST_FILENAME.sha256")
 (cd "$BACKUP_DIR" && sha256sum -c "$FILENAME.sha256" && sha256sum -c "$MANIFEST_FILENAME.sha256")
 ARCHIVE_VALIDATED=1
+vw_perf_stage_end success "$SIZE_BYTES"
+vw_perf_stage_begin "github_sync_retention_push_verify"
 
 # Refresh the checked-out branch before pruning so recently-added permanent
 # keep markers from GitHub are applied to both the working tree and local copy.
@@ -306,6 +323,8 @@ done
 LOCAL_COMMIT=$(git -C "$REPO_DIR" rev-parse "refs/heads/$GITHUB_BRANCH")
 REMOTE_COMMIT=$(git -C "$REPO_DIR" ls-remote origin "refs/heads/$GITHUB_BRANCH" | awk 'NR==1 {print $1}')
 [[ -n "$REMOTE_COMMIT" && "$LOCAL_COMMIT" == "$REMOTE_COMMIT" ]] || { FAILURE_REASON="remote commit verification mismatch"; exit 1; }
+vw_perf_stage_end success "$SIZE_BYTES"
+VW_PERF_ARTIFACT_BYTES="$SIZE_BYTES"
 
 FINAL_STATUS="success"; FAILURE_REASON=""
 write_result success "uploaded and remote commit verified"

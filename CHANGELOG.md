@@ -1,5 +1,14 @@
 # 更新日志
 
+## v1.4.0 - 性能分析与全局命令
+
+- 新增性能监控模块，记录手动/定时备份及交互式恢复的阶段耗时与总耗时；支持阶段平均/最大耗时、运行明细和 CSV 导出。
+- 新增菜单 20：查看最近运行、最近 30 次操作的阶段平均/最大耗时、指定运行详情，并导出 CSV。
+- 性能记录保存到 `/var/lib/vaultwarden-backup/performance.tsv`，权限限制为 root 可读写，不记录密钥、Token 或数据库内容。
+- 首次配置/更新后台脚本时安装全局命令 `/usr/local/bin/vbm`；从任意目录执行 `vbm` 即可打开菜单。源码仓库为 Public，可匿名 HTTPS 克隆。
+- README 与 Markdown 文档改为面向 Public 源码仓库的通用 HTTPS 克隆说明，区分 Public 源码仓库与 Private 数据备份仓库。
+
+
 ## v1.3.1 - 菜单分组与诊断报告修复
 
 - 修复菜单 15「生成系统诊断报告」的文件创建竞态：先同步创建报告文件并设置权限，再启动 `tee`，避免 `chmod: cannot access ... No such file or directory`。
