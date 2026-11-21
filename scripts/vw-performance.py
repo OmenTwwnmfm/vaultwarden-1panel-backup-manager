@@ -13,16 +13,35 @@ OP_LABELS = {"backup": "备份", "restore": "恢复"}
 STAGE_LABELS = {
     "container_discovery_preflight": "容器发现与预检查",
     "manifest_generation": "部署清单生成",
-    "snapshot_stop_sqlite_tar_age": "停止/SQLite检查/快照加密",
-    "container_restart_health": "容器重启与健康检查",
+    # Legacy aggregate stages remain readable for existing performance.tsv rows.
+    "snapshot_stop_sqlite_tar_age": "旧版：停止/SQLite检查/快照加密",
+    "container_restart_health": "旧版：容器重启与健康检查",
+    "container_stop": "停止 Vaultwarden 容器",
+    "sqlite_quick_check": "SQLite quick_check",
+    "snapshot_tar_age": "完整 /data 快照与 age 加密",
+    "container_start_command": "Docker 启动命令",
+    "container_health_check_wait": "启动后健康检查等待",
+    "recovery_container_start_command": "异常恢复：Docker 启动命令",
+    "recovery_health_check_wait": "异常恢复：健康检查等待",
     "local_validation_manifest_checksum": "本地校验/清单加密/SHA256",
     "github_sync_retention_push_verify": "GitHub同步/推送/远端核验",
     "github_clone_and_list": "GitHub克隆与备份列表",
     "restore_decrypt_validate": "age解密/归档/SQLite校验",
     "restore_target_preflight": "恢复目标检查",
-    "pre_restore_rollback_snapshot": "恢复前回滚快照",
+    "pre_restore_rollback_snapshot": "旧版：恢复前回滚快照",
+    "restore_container_stop": "恢复前停止容器",
+    "rollback_snapshot_encrypt_validate": "恢复前回滚快照加密/验证",
     "replace_production_data": "替换生产数据",
-    "container_start_health_check": "恢复后启动/健康检查",
+    "container_start_health_check": "旧版：恢复后启动/健康检查",
+    "restore_container_start_command": "恢复后 Docker 启动命令",
+    "restore_health_check_wait": "恢复后健康检查等待",
+    "cleanup_container_start_command": "清理阶段 Docker 启动命令",
+    "cleanup_health_check_wait": "清理阶段健康检查等待",
+    "restore_rollback_container_stop": "恢复失败：停止容器",
+    "restore_rollback_previous_data": "恢复失败：回滚原数据",
+    "restore_rollback_container_start": "恢复失败：重新启动命令",
+    "restore_rollback_health_wait": "恢复失败：回滚健康检查",
+    "restore_rollback_unhealthy_container_stop": "回滚后健康失败：停止容器",
     "TOTAL": "总耗时",
 }
 
@@ -59,7 +78,7 @@ def main():
             print(f"性能记录文件存在，但目前只有表头或没有有效记录：{path}")
         else:
             print(f"尚无性能记录文件：{path}")
-        print("v1.4.2 手动备份会调用当前项目中的计时版 worker。")
+        print("v1.4.3 会分别记录容器停止、SQLite 检查、快照加密、Docker 启动命令和健康检查等待。")
         print("systemd 后台任务使用 /usr/local/sbin/vw-backup.sh；项目更新后请先运行菜单 07 同步后台脚本。")
         print("完成一次手动备份或恢复后，请检查日志中是否出现 [性能] 和 [耗时] 行。")
         return 0
@@ -114,6 +133,22 @@ def main():
             label = f"{OP_LABELS.get(op, op)}/{STAGE_LABELS.get(stage, stage)}"[:38]
             print(f"{label:38} {len(values):6d} {fmt(round(statistics.mean(values))):>12} {fmt(max(values)):>12}")
     print("\n提示：GitHub 同步/推送耗时主要受 VPS 到 GitHub 的网络影响；快照/恢复耗时主要受磁盘、CPU 和数据量影响。")
+    if recent_totals:
+        latest_run_id = recent_totals[-1]["run_id"]
+        latest_rows = [r for r in stage_rows if r["run_id"] == latest_run_id]
+        latest_rows = [r for r in latest_rows if r["status"] in ("success", "failed", "interrupted")]
+        stage_sum = sum(r["duration_ms"] for r in latest_rows)
+        if latest_rows and stage_sum > 0:
+            print("\n最近一次运行的阶段分布（百分比以已计时阶段合计为基数）：")
+            print(f"{'阶段':38} {'耗时':>12} {'占比':>9} {'状态':>10}")
+            for row in sorted(latest_rows, key=lambda r: r["duration_ms"], reverse=True):
+                label = STAGE_LABELS.get(row["stage"], row["stage"])[:38]
+                pct = row["duration_ms"] * 100 / stage_sum
+                print(f"{label:38} {fmt(row['duration_ms']):>12} {pct:8.1f}% {row['status']:>10}")
+            bottleneck = max(latest_rows, key=lambda r: r["duration_ms"])
+            print(f"主要耗时阶段：{STAGE_LABELS.get(bottleneck['stage'], bottleneck['stage'])}（{fmt(bottleneck['duration_ms'])}）")
+    print("\n提示：v1.4.3 将容器停止、SQLite 检查、快照加密、Docker 启动命令和健康检查等待拆开计时。")
+    print("GitHub 同步/推送耗时主要受 VPS 到 GitHub 的网络影响；健康检查等待主要受应用启动和 Docker Healthcheck 状态影响。")
     print("总耗时包含交互式操作等待时间；分析纯处理性能时，请重点比较各阶段耗时。")
     print("性能文件仅记录阶段名称、时长、状态和字节数，不记录密码或 Token。")
     return 0

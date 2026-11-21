@@ -100,11 +100,24 @@ on_exit() {
   trap - EXIT
   if [[ "$STOPPED" == 1 ]]; then
     echo "CRITICAL: attempting to restart Vaultwarden after backup error..."
-    if docker start "$CONTAINER" >/dev/null && wait_container_healthy "$CONTAINER"; then
-      STOPPED=0; echo "Vaultwarden restart succeeded."
+    vw_perf_stage_begin "recovery_container_start_command"
+    if docker start "$CONTAINER" >/dev/null; then
+      STOPPED=0
+      vw_perf_stage_end success
+      vw_perf_stage_begin "recovery_health_check_wait"
+      if wait_container_healthy "$CONTAINER"; then
+        vw_perf_stage_end success
+        echo "Vaultwarden restart succeeded."
+      else
+        vw_perf_stage_end failed
+        echo "CRITICAL: Vaultwarden could not be confirmed healthy. Start/check it in 1Panel immediately."
+        vw_notify failure "CRITICAL: Vaultwarden backup task failed and container $CONTAINER could not be confirmed healthy. Check 1Panel immediately."
+        rc=1
+      fi
     else
-      echo "CRITICAL: Vaultwarden could not be confirmed healthy. Start/check it in 1Panel immediately."
-      vw_notify failure "CRITICAL: Vaultwarden backup task failed and container $CONTAINER could not be confirmed healthy. Check 1Panel immediately."
+      vw_perf_stage_end failed
+      echo "CRITICAL: docker start failed. Start/check Vaultwarden in 1Panel immediately."
+      vw_notify failure "CRITICAL: Vaultwarden backup task failed and docker start failed for $CONTAINER. Check 1Panel immediately."
       rc=1
     fi
   fi
@@ -172,33 +185,40 @@ vw_perf_stage_begin "manifest_generation"
 MANIFEST_PLAIN="$TMP_ROOT/deployment-manifest.json"
 if ! python3 "$MANIFEST_TOOL" "$CONTAINER" "$MANIFEST_PLAIN"; then FAILURE_REASON="could not create sanitized deployment manifest"; exit 1; fi
 vw_perf_stage_end success
-vw_perf_stage_begin "snapshot_stop_sqlite_tar_age"
-
 # Snapshot the whole /data mount while the app is stopped. All SQLite DB/WAL/SHM
 # files and attachments therefore belong to one consistent point in time.
 echo "Stopping Vaultwarden briefly to create a consistent /data snapshot..."
+vw_perf_stage_begin "container_stop"
 if ! docker stop --time 30 "$CONTAINER" >/dev/null; then FAILURE_REASON="docker stop failed"; exit 1; fi
 STOPPED=1
+vw_perf_stage_end success
+
+vw_perf_stage_begin "sqlite_quick_check"
 if command -v sqlite3 >/dev/null 2>&1; then
   SQLITE_RESULT=$(sqlite3 -readonly "$DATA_DIR/db.sqlite3" 'PRAGMA quick_check;' 2>&1) || { FAILURE_REASON="SQLite quick_check command failed: $SQLITE_RESULT"; echo "ERROR: $FAILURE_REASON"; exit 1; }
   [[ "$SQLITE_RESULT" == "ok" ]] || { FAILURE_REASON="SQLite quick_check failed: $SQLITE_RESULT"; echo "ERROR: $FAILURE_REASON"; exit 1; }
   echo "SQLite quick_check: OK"
+  vw_perf_stage_end success "$(stat -c '%s' "$DATA_DIR/db.sqlite3")"
 else
   echo "WARNING: sqlite3 command missing; DB quick_check skipped."
+  vw_perf_stage_end skipped
 fi
 
+vw_perf_stage_begin "snapshot_tar_age"
 echo "Creating encrypted complete /data snapshot..."
 if ! tar --numeric-owner -czpf - -C "$DATA_DIR" . | age -r "$AGE_RECIPIENT" -o "$OUTPUT"; then FAILURE_REASON="tar/gzip/age pipeline failed"; exit 1; fi
 [[ -s "$OUTPUT" ]] || { FAILURE_REASON="encrypted archive is empty"; exit 1; }
-
 vw_perf_stage_end success "$(stat -c '%s' "$OUTPUT")"
-vw_perf_stage_begin "container_restart_health"
 
 # Start the service immediately after snapshot generation, before Git/network work.
 echo "Encrypted snapshot created. Restarting Vaultwarden before network upload..."
-if ! docker start "$CONTAINER" >/dev/null; then FAILURE_REASON="snapshot made but docker start failed"; exit 1; fi
+vw_perf_stage_begin "container_start_command"
+if ! docker start "$CONTAINER" >/dev/null; then FAILURE_REASON="snapshot made but docker start failed"; vw_perf_stage_end failed; exit 1; fi
 STOPPED=0
-if ! wait_container_healthy "$CONTAINER"; then FAILURE_REASON="container did not become healthy after snapshot"; exit 1; fi
+vw_perf_stage_end success
+
+vw_perf_stage_begin "container_health_check_wait"
+if ! wait_container_healthy "$CONTAINER"; then FAILURE_REASON="container did not become healthy after snapshot"; vw_perf_stage_end failed; exit 1; fi
 vw_perf_stage_end success
 vw_perf_stage_begin "local_validation_manifest_checksum"
 

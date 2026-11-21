@@ -10,7 +10,7 @@
 ![Panel](https://img.shields.io/badge/panel-1Panel-1677ff)
 ![Encryption](https://img.shields.io/badge/encryption-age-16a34a)
 ![Scheduler](https://img.shields.io/badge/scheduler-systemd-6d28d9)
-![Version](https://img.shields.io/badge/version-1.4.2-blue)
+![Version](https://img.shields.io/badge/version-1.4.3-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 </div>
@@ -33,12 +33,14 @@ Vaultwarden 将用户密码库保存在自己的服务器上，因此需要可�
 
 ### 性能监控与执行耗时分析
 
-- **阶段级计时**：分别记录容器发现/预检查、部署清单生成、快照与加密、容器启动健康检查、本地校验、GitHub 同步/推送/远端核验等阶段。
-- **恢复过程计时**：记录 GitHub 获取、解密与校验、恢复目标检查、恢复前回滚快照、生产数据替换、容器启动与健康检查。
+- **阶段级计时**：备份分别记录容器发现、部署清单生成、容器停止、SQLite `quick_check`、完整 `/data` 快照与 age 加密、Docker 启动命令、启动后健康检查等待、本地校验、GitHub 同步/推送/远端核验；恢复分别记录容器停止、恢复前回滚快照、生产数据替换、Docker 启动命令和健康检查等待。
+- **恢复过程计时**：记录 GitHub 获取、解密与校验、恢复目标检查、恢复前停止容器、回滚快照加密/验证、生产数据替换、Docker 启动命令、健康检查等待及失败回滚步骤。
 - **历史趋势**：汇总最近 20 次操作，按最近 30 次操作计算各阶段平均耗时与最大耗时，帮助判断瓶颈是在 VPS 磁盘/CPU 还是 GitHub 网络。
 - **CSV 导出**：可将性能历史导出为 CSV，便于用 Excel 分析。
 - **隐私保护**：性能记录只包含时间、操作类型、运行 ID、阶段、耗时、状态和字节数，不保存密码、Token、私钥或数据库内容。
-- 记录文件：`/var/lib/vaultwarden-backup/performance.tsv`，权限为 root 专用。 v1.4.2 起，菜单内手动备份会直接调用当前项目目录中的计时版 worker，避免旧的系统安装副本导致没有性能记录；systemd 任务仍调用 `/usr/local/sbin/vw-backup.sh`，更新源码后需通过菜单 07 同步后台脚本。
+- 记录文件：`/var/lib/vaultwarden-backup/performance.tsv`，权限为 root 专用。v1.4.2 起，菜单内手动备份会直接调用当前项目目录中的计时版 worker；systemd 任务仍调用 `/usr/local/sbin/vw-backup.sh`，更新源码后需通过菜单 07 同步后台脚本。v1.4.3 起，容器停止、SQLite 检查、快照加密、Docker 启动命令、启动后健康检查等待均单独记录。
+- **瓶颈定位**：性能摘要会显示最近一次运行的阶段耗时占比与最大耗时阶段。若 `启动后健康检查等待` 很高，说明时间花在容器启动后的 Docker Healthcheck 等待，而不是 tar/age；请结合 `docker inspect` 的 Healthcheck 配置与历史状态判断，不要为了速度直接跳过健康检查。
+
 
 ### 全局快捷命令
 
@@ -360,4 +362,4 @@ vbm
 
 ### 性能记录为空时怎么办？
 
-如果菜单 20 显示没有性能记录，v1.4.2 的手动备份会优先执行当前源码目录中的计时版 worker，并显式使用同一份 `vw-common.sh`。请在备份日志中确认出现 `[性能] 已启用阶段耗时记录` 和 `[耗时]` 行。systemd 使用系统安装版 worker；更新源码后请先执行菜单 `[07]` 同步后台脚本。性能记录位于 `/var/lib/vaultwarden-backup/performance.tsv`。
+如果菜单 20 显示没有性能记录，手动备份会优先执行当前源码目录中的计时版 worker，并显式使用同一份 `vw-common.sh`。请在备份日志中确认出现 `[性能] 已启用阶段耗时记录` 和 `[耗时]` 行。systemd 使用系统安装版 worker；更新源码后请先执行菜单 `[07]` 同步后台脚本。性能记录位于 `/var/lib/vaultwarden-backup/performance.tsv`。v1.4.3 起，备份的“容器停止”“SQLite 检查”“快照加密”“Docker 启动命令”“健康检查等待”分别计时；恢复也会分别记录启动命令和健康检查等待。旧版本聚合记录仍保留，不能追溯拆分。

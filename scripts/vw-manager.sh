@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION="1.4.2"
+VERSION="1.4.3"
 CONFIG_FILE="/etc/vaultwarden-backup.conf"
 BACKUP_SCRIPT="/usr/local/sbin/vw-backup.sh"
 RESTORE_SCRIPT="/usr/local/sbin/vw-restore-prepare.sh"
@@ -565,10 +565,23 @@ restore_from_github() (
       if [[ "${data_change_started:-0}" == "1" ]]; then
         echo "严重提醒：恢复过程中断，数据目录可能处于恢复中间状态。为避免使用不完整数据，容器保持停止。" >&2
         echo "使用原 age 私钥和回滚文件完成恢复前，不要在 1Panel 中启动该容器。" >&2
-      elif docker start "$container" >/dev/null 2>&1; then
-        echo "安全清理：已尝试重新启动 Vaultwarden 容器：$container"
       else
-        echo "严重提醒：自动清理时无法启动 Vaultwarden。请进入 1Panel 手动启动：$container" >&2
+        vw_perf_stage_begin "cleanup_container_start_command"
+        if docker start "$container" >/dev/null 2>&1; then
+          stopped_by_script=0
+          vw_perf_stage_end success
+          vw_perf_stage_begin "cleanup_health_check_wait"
+          if vw_wait_healthy "$container" 30 2; then
+            vw_perf_stage_end success
+            echo "安全清理：Vaultwarden 已重新启动并通过健康检查：$container"
+          else
+            vw_perf_stage_end failed
+            echo "严重提醒：容器已启动，但未通过健康检查。请进入 1Panel 检查：$container" >&2
+          fi
+        else
+          vw_perf_stage_end failed
+          echo "严重提醒：自动清理时无法启动 Vaultwarden。请进入 1Panel 手动启动：$container" >&2
+        fi
       fi
     fi
     [[ -n "${staging:-}" ]] && rm -rf -- "$staging"
@@ -677,9 +690,9 @@ restore_from_github() (
     return 0
   fi
 
-  vw_perf_stage_begin "pre_restore_rollback_snapshot"
   local was_running=0 rollback_ok=0
   [[ "$container_state" == "running" ]] && was_running=1
+  vw_perf_stage_begin "restore_container_stop"
   if ((was_running == 1)); then
     info "正在停止 Vaultwarden 容器：$container"
     if ! docker stop --time 30 "$container" >/dev/null; then
@@ -687,8 +700,12 @@ restore_from_github() (
       return 1
     fi
     stopped_by_script=1
+    vw_perf_stage_end success
+  else
+    vw_perf_stage_end skipped
   fi
 
+  vw_perf_stage_begin "rollback_snapshot_encrypt_validate"
   # Create an encrypted pre-restore snapshot before changing anything. The original
   # age identity supplied above can decrypt it if the restore must be rolled back.
   echo "正在加密保存当前 /data，以便恢复失败时回滚..."
@@ -763,7 +780,6 @@ restore_from_github() (
   fi
   data_change_started=0
   vw_perf_stage_end success
-  vw_perf_stage_begin "container_start_health_check"
 
   ok "数据恢复文件已复制完成。原数据的加密回滚快照保留在：$rollback_archive"
   start_choice="yes"
@@ -773,20 +789,80 @@ restore_from_github() (
     start_choice="yes"
   fi
   if [[ "${start_choice,,}" == "yes" ]]; then
-    if docker start "$container" >/dev/null && vw_wait_healthy "$container" 30 2; then
+    vw_perf_stage_begin "restore_container_start_command"
+    if docker start "$container" >/dev/null; then
       stopped_by_script=0
-      ok "Vaultwarden 已启动并达到 running/healthy 状态。"
+      vw_perf_stage_end success
     else
-      err "恢复后的实例未能正常启动/健康检查未通过，准备回滚到恢复前数据。"
-      docker stop --time 20 "$container" >/dev/null 2>&1 || true
-      if rollback_from_snapshot && docker start "$container" >/dev/null && vw_wait_healthy "$container" 30 2; then
-        stopped_by_script=0
-        data_change_started=0
-        warn "已自动回滚到恢复前数据并成功启动。原回滚文件仍保留：$rollback_archive"
+      vw_perf_stage_end failed
+      err "恢复后的容器启动命令失败，准备回滚到恢复前数据。"
+      start_choice="start_failed"
+    fi
+    if [[ "$start_choice" != "start_failed" ]]; then
+      vw_perf_stage_begin "restore_health_check_wait"
+      if vw_wait_healthy "$container" 30 2; then
+        vw_perf_stage_end success
+        ok "Vaultwarden 已启动并达到 running/healthy 状态。"
       else
+        vw_perf_stage_end failed
+        err "恢复后的实例未通过健康检查，准备回滚到恢复前数据。"
+        start_choice="health_failed"
+      fi
+    fi
+    if [[ "$start_choice" == "start_failed" || "$start_choice" == "health_failed" ]]; then
+      current_state=$(docker inspect -f '{{.State.Status}}' "$container" 2>/dev/null || echo unknown)
+      vw_perf_stage_begin "restore_rollback_container_stop"
+      if [[ "$current_state" == "running" ]]; then
+        if docker stop --time 20 "$container" >/dev/null 2>&1; then
+          stopped_by_script=1
+          vw_perf_stage_end success
+        else
+          vw_perf_stage_end failed
+          err "无法停止恢复后的容器；为避免在线修改正在使用的数据库，自动回滚已中止。请先在 1Panel 停止容器，再手动重试恢复。"
+          data_change_started=0
+          rm -rf -- "$staging" "$temp_root"
+          return 1
+        fi
+      else
+        vw_perf_stage_end skipped
+      fi
+      vw_perf_stage_begin "restore_rollback_previous_data"
+      if rollback_from_snapshot; then
+        vw_perf_stage_end success
+        data_change_started=0
+        vw_perf_stage_begin "restore_rollback_container_start"
+        if docker start "$container" >/dev/null; then
+          stopped_by_script=0
+          vw_perf_stage_end success
+          vw_perf_stage_begin "restore_rollback_health_wait"
+          if vw_wait_healthy "$container" 30 2; then
+            vw_perf_stage_end success
+            warn "已自动回滚到恢复前数据并成功启动。原回滚文件仍保留：$rollback_archive"
+          else
+            vw_perf_stage_end failed
+            data_change_started=0
+            vw_perf_stage_begin "restore_rollback_unhealthy_container_stop"
+            if docker stop --time 20 "$container" >/dev/null 2>&1; then
+              stopped_by_script=0
+              vw_perf_stage_end success
+              err "原数据已恢复，但回滚后的容器未通过健康检查，已停止容器。请在 1Panel 检查日志。"
+            else
+              stopped_by_script=0
+              vw_perf_stage_end failed
+              err "原数据已恢复，但容器未通过健康检查且无法停止。容器仍在运行，请立即在 1Panel 检查；不要再次覆盖数据。"
+            fi
+          fi
+        else
+          vw_perf_stage_end failed
+          stopped_by_script=1
+          data_change_started=0
+          err "原数据已恢复，但容器启动失败。请在 1Panel 检查启动状态。"
+        fi
+      else
+        vw_perf_stage_end failed
         stopped_by_script=1
         data_change_started=1
-        err "严重错误：恢复后的实例未通过健康检查，自动回滚/启动也未完全成功。容器可能保持停止。回滚文件：$rollback_archive"
+        err "严重错误：自动回滚数据失败！容器保持停止。回滚文件：$rollback_archive"
         echo "请勿在 1Panel 中启动容器，先检查数据目录和回滚文件。"
       fi
       rm -rf -- "$staging" "$temp_root"
@@ -794,10 +870,13 @@ restore_from_github() (
     fi
   else
     stopped_by_script=0
+    vw_perf_stage_begin "restore_container_start_command"
+    vw_perf_stage_end skipped
+    vw_perf_stage_begin "restore_health_check_wait"
+    vw_perf_stage_end skipped
     warn "已按你的选择保持容器停止。稍后可在 1Panel → 已安装应用中手动启动。"
   fi
   warn "请登录网页测试原用户、附件、TOTP 与同步。确认一切正常之前，不要删除原数据加密回滚快照：$rollback_archive"
-  vw_perf_stage_end success
   ok "恢复暂存目录将在退出菜单时自动清理。"
   pause
 )
@@ -1268,7 +1347,7 @@ performance_monitor() {
   [[ -f "$tool" ]] || { err "找不到性能分析工具，请从项目目录运行菜单 07 更新脚本。"; pause; return 1; }
   if [[ ! -f "$perf_file" ]]; then
     warn "尚未找到性能记录文件：$perf_file"
-    echo "v1.4.2 手动备份会直接调用当前项目中的计时版 worker。"
+    echo "v1.4.3 已拆分容器停止、SQLite 检查、快照加密、容器启动命令和健康检查等待等阶段。"
     echo "systemd 自动备份使用系统安装版 worker；更新项目后请先执行菜单 07 同步后台脚本。"
     echo "完成一次成功或失败的手动备份/恢复后，再返回此处查看性能记录。"
     pause
