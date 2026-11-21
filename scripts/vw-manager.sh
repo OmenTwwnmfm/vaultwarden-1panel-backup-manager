@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION="1.4.1"
+VERSION="1.4.2"
 CONFIG_FILE="/etc/vaultwarden-backup.conf"
 BACKUP_SCRIPT="/usr/local/sbin/vw-backup.sh"
 RESTORE_SCRIPT="/usr/local/sbin/vw-restore-prepare.sh"
@@ -36,10 +36,12 @@ confirm_yes() {
   [[ "${answer,,}" == "yes" ]]
 }
 confirm_yes_upper() {
+  # Keep the historical function name for compatibility, but accept YES in
+  # any letter case. This is case-insensitive, not a single-key confirmation.
   local prompt="$1" answer
   printf '\n%s\n' "$prompt"
-  read -r -p "这是有风险的操作。请输入大写 YES 确认: " answer || true
-  [[ "$answer" == "YES" ]]
+  read -r -p "这是有风险的操作。输入 yes 确认（大小写不敏感，例如 yes / YES / Yes）: " answer || true
+  [[ "${answer,,}" == "yes" ]]
 }
 read_default() {
   local prompt="$1" default="$2" value
@@ -522,15 +524,25 @@ check_configuration() {
 }
 
 run_backup_now() {
-  [[ -x "$BACKUP_SCRIPT" ]] || { err "备份脚本尚未安装，请先运行菜单 1。"; return 1; }
   load_config || return 1
+  # Interactive/manual backup should execute the worker from the currently
+  # checked-out project, not a possibly stale copy installed by an older menu
+  # release. systemd continues to use /usr/local/sbin/vw-backup.sh, which is
+  # synchronized by menu 07 / the startup updater.
+  local worker="$BACKUP_SCRIPT" common_lib="$COMMON_LIB" manifest_tool="/usr/local/libexec/vw-manifest.py"
+  [[ -f "$SCRIPT_DIR/vw-backup.sh" ]] && worker="$SCRIPT_DIR/vw-backup.sh"
+  [[ -f "$SCRIPT_DIR/vw-common.sh" ]] && common_lib="$SCRIPT_DIR/vw-common.sh"
+  [[ -f "$SCRIPT_DIR/vw-manifest.py" ]] && manifest_tool="$SCRIPT_DIR/vw-manifest.py"
+  [[ -f "$worker" ]] || { err "找不到备份脚本：$worker。请先运行菜单 07 更新后台脚本。"; return 1; }
   echo "将执行：自动重新检测当前 Vaultwarden 容器与 /data 挂载 → 停止服务 → 完整备份并加密 → 启动服务 → 推送 GitHub。"
   echo "上次记录容器：$CONTAINER"
   echo "上次记录数据目录：$DATA_DIR"
+  echo "本次手动备份脚本：$worker"
+  echo "性能记录文件：/var/lib/vaultwarden-backup/performance.tsv"
   echo "如果 1Panel 重建过容器，后台脚本会优先按原数据目录重新匹配，并将新容器名写回配置。"
   if ! confirm_yes_upper "此操作会使 Vaultwarden 短暂不可用。确认立即备份？"; then warn "已取消。"; return 0; fi
   local rc=0
-  if bash "$BACKUP_SCRIPT"; then rc=0; else rc=$?; fi
+  if VW_COMMON_LIB="$common_lib" VW_MANIFEST_TOOL="$manifest_tool" VW_PERF_FILE="/var/lib/vaultwarden-backup/performance.tsv" bash "$worker"; then rc=0; else rc=$?; fi
   if ((rc == 0)); then ok "备份脚本执行完成。"; else err "备份执行失败，先查看日志：$LOG_FILE"; fi
   pause
   return "$rc"
@@ -1251,9 +1263,17 @@ view_deployment_manifest() (
 )
 
 performance_monitor() {
-  local tool="$SCRIPT_DIR/vw-performance.py" choice
+  local tool="$SCRIPT_DIR/vw-performance.py" choice perf_file="/var/lib/vaultwarden-backup/performance.tsv"
   [[ -f "$tool" ]] || tool="/usr/local/libexec/vw-performance.py"
   [[ -f "$tool" ]] || { err "找不到性能分析工具，请从项目目录运行菜单 07 更新脚本。"; pause; return 1; }
+  if [[ ! -f "$perf_file" ]]; then
+    warn "尚未找到性能记录文件：$perf_file"
+    echo "v1.4.2 手动备份会直接调用当前项目中的计时版 worker。"
+    echo "systemd 自动备份使用系统安装版 worker；更新项目后请先执行菜单 07 同步后台脚本。"
+    echo "完成一次成功或失败的手动备份/恢复后，再返回此处查看性能记录。"
+    pause
+    return 0
+  fi
   while true; do
     clear 2>/dev/null || true
     echo "╭──────────────────────────────────────────────────────────────╮"
@@ -1267,17 +1287,17 @@ performance_monitor() {
     echo "╰──────────────────────────────────────────────────────────────╯"
     read -r -p "请选择 [0-4]: " choice || return 0
     case "$choice" in
-      1) python3 "$tool" /var/lib/vaultwarden-backup/performance.tsv; pause ;;
-      2) python3 "$tool" /var/lib/vaultwarden-backup/performance.tsv --recent; pause ;;
+      1) python3 "$tool" "$perf_file"; pause ;;
+      2) python3 "$tool" "$perf_file" --recent; pause ;;
       3)
         read -r -p "输入运行 ID（可从最近运行列表复制）: " run_id
-        [[ -n "$run_id" ]] && python3 "$tool" /var/lib/vaultwarden-backup/performance.tsv --details "$run_id"
+        [[ -n "$run_id" ]] && python3 "$tool" "$perf_file" --details "$run_id"
         pause
         ;;
       4)
         local out="/var/backups/vaultwarden/performance-$(date +%Y%m%d-%H%M%S).csv"
         mkdir -p "$(dirname "$out")"; chmod 700 "$(dirname "$out")"
-        python3 "$tool" /var/lib/vaultwarden-backup/performance.tsv --csv "$out"
+        python3 "$tool" "$perf_file" --csv "$out"
         chmod 600 "$out" 2>/dev/null || true
         pause
         ;;

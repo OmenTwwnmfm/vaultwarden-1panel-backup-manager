@@ -161,11 +161,22 @@ vw_perf_now_ms() {
 
 vw_perf_init() {
   local operation="$1" run_id="$2" file="${VW_PERF_FILE:-$VW_PERF_FILE_DEFAULT}"
-  mkdir -p "$(dirname "$file")" /run/lock
-  touch "$file"
-  chmod 600 "$file"
+  if ! mkdir -p "$(dirname "$file")" /run/lock; then
+    echo "[WARN] 无法创建性能记录目录：$(dirname "$file")；备份/恢复继续执行，但本次不会保存性能记录。" >&2
+    VW_PERF_STARTED=0
+    return 0
+  fi
+  if ! touch "$file" || ! chmod 600 "$file"; then
+    echo "[WARN] 无法创建或设置性能记录文件权限：$file；备份/恢复继续执行，但本次不会保存性能记录。" >&2
+    VW_PERF_STARTED=0
+    return 0
+  fi
   if [[ ! -s "$file" ]]; then
-    printf 'timestamp\toperation\trun_id\tstage\tduration_ms\tstatus\tbytes\n' >> "$file"
+    if ! printf 'timestamp\toperation\trun_id\tstage\tduration_ms\tstatus\tbytes\n' >> "$file"; then
+      echo "[WARN] 无法写入性能记录表头：$file；备份/恢复继续执行，但本次不会保存性能记录。" >&2
+      VW_PERF_STARTED=0
+      return 0
+    fi
   fi
   VW_PERF_FILE="$file"
   VW_PERF_OPERATION="$operation"
@@ -176,21 +187,31 @@ vw_perf_init() {
   VW_PERF_STARTED=1
   VW_PERF_FINISHED=0
   export VW_PERF_FILE VW_PERF_OPERATION VW_PERF_RUN_ID VW_PERF_TOTAL_START_MS VW_PERF_STARTED VW_PERF_FINISHED
+  echo "[性能] 已启用阶段耗时记录：$VW_PERF_FILE"
 }
 
 vw_perf_append_row() {
   local stage="$1" duration_ms="$2" status="$3" bytes="${4:-0}"
-  local lock_file="/run/lock/vaultwarden-performance.lock"
-  mkdir -p /run/lock "$(dirname "${VW_PERF_FILE:-$VW_PERF_FILE_DEFAULT}")"
-  exec 7>"$lock_file"
-  flock 7
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$(date '+%F %T %Z')" \
-    "${VW_PERF_OPERATION:-unknown}" \
-    "${VW_PERF_RUN_ID:-unknown}" \
-    "$stage" "$duration_ms" "$status" "$bytes" >> "${VW_PERF_FILE:-$VW_PERF_FILE_DEFAULT}"
-  flock -u 7
-  exec 7>&-
+  local file="${VW_PERF_FILE:-$VW_PERF_FILE_DEFAULT}" lock_file="/run/lock/vaultwarden-performance.lock"
+  local timestamp
+  timestamp=$(date '+%F %T %Z')
+  if ! mkdir -p /run/lock "$(dirname "$file")"; then
+    echo "[WARN] 性能记录目录不可写：$(dirname "$file")" >&2
+    return 0
+  fi
+  # Lock only the append operation; a subshell prevents the file descriptor
+  # from leaking into later commands or nested functions.
+  if ! (
+    flock -x 9 || exit 1
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$timestamp" \
+      "${VW_PERF_OPERATION:-unknown}" \
+      "${VW_PERF_RUN_ID:-unknown}" \
+      "$stage" "$duration_ms" "$status" "$bytes" >> "$file"
+  ) 9>"$lock_file"; then
+    echo "[WARN] 无法追加性能记录：$file（不影响备份/恢复结果）" >&2
+    return 0
+  fi
 }
 
 vw_perf_stage_begin() {

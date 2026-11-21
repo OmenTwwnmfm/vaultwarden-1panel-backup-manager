@@ -55,8 +55,13 @@ def main():
     path = Path(args.file)
     rows = read_rows(path)
     if not rows:
-        print(f"尚无性能记录：{path}")
-        print("完成至少一次手动备份或恢复后，这里会显示阶段耗时。")
+        if path.exists():
+            print(f"性能记录文件存在，但目前只有表头或没有有效记录：{path}")
+        else:
+            print(f"尚无性能记录文件：{path}")
+        print("v1.4.2 手动备份会调用当前项目中的计时版 worker。")
+        print("systemd 后台任务使用 /usr/local/sbin/vw-backup.sh；项目更新后请先运行菜单 07 同步后台脚本。")
+        print("完成一次手动备份或恢复后，请检查日志中是否出现 [性能] 和 [耗时] 行。")
         return 0
     if args.csv:
         out = Path(args.csv)

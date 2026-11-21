@@ -49,7 +49,10 @@ done
 [[ "$GIT_PUSH_RETRIES" =~ ^[0-9]+$ ]] && (( GIT_PUSH_RETRIES >= 1 && GIT_PUSH_RETRIES <= 10 )) || { echo "ERROR: GIT_PUSH_RETRIES must be 1..10."; exit 1; }
 
 TIMESTAMP=$(date '+%Y%m%d-%H%M%S')
+VW_PERF_FILE="${VW_PERF_FILE:-/var/lib/vaultwarden-backup/performance.tsv}"
+export VW_PERF_FILE
 vw_perf_init backup "$TIMESTAMP"
+echo "Performance records: ${VW_PERF_FILE}"
 vw_perf_stage_begin "container_discovery_preflight"
 FILENAME="vw-${TIMESTAMP}.tar.gz.age"
 MANIFEST_FILENAME="vw-${TIMESTAMP}.manifest.json.age"
