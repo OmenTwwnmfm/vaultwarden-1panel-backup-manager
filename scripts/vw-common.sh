@@ -75,16 +75,103 @@ vw_save_config() {
 
 
 vw_wait_healthy() {
-  local container="$1" attempts="${2:-30}" delay="${3:-2}" i state health
-  for ((i=1; i<=attempts; i++)); do
+  # Prefer an active readiness probe when the configured Docker healthcheck is
+  # Vaultwarden's own /healthcheck.sh. Docker's native scheduler may run only
+  # once every 60 seconds; waiting for .State.Health=healthy after docker start
+  # can therefore add an avoidable minute even when /alive is already serving.
+  # We execute the exact same probe twice, two seconds apart, and keep a hard
+  # timeout. The Docker healthcheck itself remains enabled and unchanged.
+  local container="$1" timeout_s="${2:-120}" delay_s="${3:-2}" required="${4:-2}"
+  local health_test state health start_ms now_ms probe_start probe_end
+  local successes=0 previous_success_ms=0 last_probe_rc=1
+  local native_start native_end native_elapsed
+  [[ "$timeout_s" =~ ^[0-9]+$ ]] && (( timeout_s >= 1 )) || timeout_s=120
+  [[ "$delay_s" =~ ^[0-9]+$ ]] || delay_s=2
+  [[ "$required" =~ ^[0-9]+$ ]] && (( required >= 1 && required <= 5 )) || required=2
+
+  start_ms=$(vw_perf_now_ms)
+  health_test=$(docker inspect -f '{{json .Config.Healthcheck.Test}}' "$container" 2>/dev/null || echo '[]')
+
+  if [[ "$health_test" == '["CMD","/healthcheck.sh"]' ]]; then
+    echo "[健康检查] 使用 Vaultwarden 原生 /healthcheck.sh 主动探测；间隔 ${delay_s}s，连续成功 ${required} 次，超时 ${timeout_s}s。"
+    while :; do
+      state=$(docker inspect -f '{{.State.Status}}' "$container" 2>/dev/null || echo missing)
+      if [[ "$state" == running ]]; then
+        probe_start=$(vw_perf_now_ms)
+        if timeout --signal=TERM --kill-after=2s 12s docker exec "$container" /healthcheck.sh >/dev/null 2>&1; then
+          probe_end=$(vw_perf_now_ms)
+          last_probe_rc=0
+          if (( successes == 0 )); then
+            vw_perf_record_event readiness_probe_first_success "$((probe_end - start_ms))" success 0
+            echo "[健康检查] 首次主动探测成功。"
+          else
+            vw_perf_record_event readiness_probe_confirmation "$((probe_end - previous_success_ms))" success 0
+            echo "[健康检查] 连续第 ${required} 次主动探测成功。"
+          fi
+          successes=$((successes + 1))
+          previous_success_ms=$probe_end
+          if (( successes >= required )); then
+            native_start=$(vw_perf_now_ms)
+            health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' "$container" 2>/dev/null || echo unknown)
+            native_end=$(vw_perf_now_ms)
+            native_elapsed=$((native_end - native_start))
+            vw_perf_record_event docker_native_health_observation "$native_elapsed" success 0
+            if [[ "$health" == healthy ]]; then
+              echo "[健康检查] Docker 原生状态：healthy。"
+            elif [[ "$health" == unhealthy ]]; then
+              echo "[警告] Docker 原生状态仍为 unhealthy，但与其相同的 /healthcheck.sh 已连续通过两次；原生状态可能尚未刷新，本工具以两次主动探测结果确认应用就绪。"
+            else
+              echo "[信息] Vaultwarden 主动健康探测已连续通过；Docker 原生状态当前为 '${health}'。原生状态会在 Docker 下一轮定时检查后更新，本工具不再被动等待 60 秒。"
+            fi
+            return 0
+          fi
+        else
+          last_probe_rc=$?
+          successes=0
+        fi
+      else
+        successes=0
+      fi
+
+      now_ms=$(vw_perf_now_ms)
+      if (( now_ms - start_ms >= timeout_s * 1000 )); then
+        if (( successes > 0 )); then
+          vw_perf_record_event readiness_probe_confirmation "$((now_ms - previous_success_ms))" failed 0
+        else
+          vw_perf_record_event readiness_probe_first_success "$((now_ms - start_ms))" failed 0
+        fi
+        health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' "$container" 2>/dev/null || echo unknown)
+        vw_error "主动健康探测超时：container=$container state=$state health=$health last_probe_exit=$last_probe_rc timeout=${timeout_s}s"
+        return 1
+      fi
+      sleep "$delay_s"
+    done
+  fi
+
+  # Compatibility fallback for non-standard healthchecks. This preserves the
+  # native Docker healthcheck semantics for images not using /healthcheck.sh.
+  echo "[健康检查] 当前镜像未配置 Vaultwarden /healthcheck.sh 探针，回退为 Docker 原生 Health 状态轮询。"
+  while :; do
     state=$(docker inspect -f '{{.State.Status}}' "$container" 2>/dev/null || echo missing)
     health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' "$container" 2>/dev/null || echo unknown)
-    [[ "$state" == running ]] || { sleep "$delay"; continue; }
-    [[ "$health" == unhealthy || "$health" == starting ]] && { sleep "$delay"; continue; }
-    return 0
+    if [[ "$state" == running && ( "$health" == healthy || "$health" == no-healthcheck ) ]]; then
+      now_ms=$(vw_perf_now_ms)
+      vw_perf_record_event docker_native_health_poll_wait "$((now_ms - start_ms))" success 0
+      if [[ "$health" == no-healthcheck ]]; then
+        echo "[警告] 容器没有配置 Docker Healthcheck；本次只能确认容器处于 running，不能证明应用 HTTP 接口可用。"
+      else
+        echo "[健康检查] Docker 原生状态已达到 healthy。"
+      fi
+      return 0
+    fi
+    now_ms=$(vw_perf_now_ms)
+    if (( now_ms - start_ms >= timeout_s * 1000 )); then
+      vw_perf_record_event docker_native_health_poll_wait "$((now_ms - start_ms))" failed 0
+      vw_error "容器未能在 ${timeout_s}s 内达到 running/healthy：$container（state=$state health=$health）"
+      return 1
+    fi
+    sleep "$delay_s"
   done
-  vw_error "容器未能达到 running/healthy：$container（state=$state health=$health）"
-  return 1
 }
 
 vw_format_bytes() {
@@ -212,6 +299,16 @@ vw_perf_append_row() {
     echo "[WARN] 无法追加性能记录：$file（不影响备份/恢复结果）" >&2
     return 0
   fi
+}
+
+vw_perf_record_event() {
+  # Record a child timing without disturbing the caller's current aggregate
+  # stage. The caller records the enclosing health-check stage with status
+  # "aggregate"; analytics ignore that summary row to avoid double counting.
+  local stage="$1" duration_ms="$2" status="${3:-success}" bytes="${4:-0}"
+  [[ "${VW_PERF_STARTED:-0}" == 1 && "${VW_PERF_FINISHED:-0}" != 1 ]] || return 0
+  vw_perf_append_row "$stage" "$duration_ms" "$status" "$bytes"
+  printf '[耗时] %-34s %8.3f 秒 (%s)\n' "$stage" "$(awk -v ms="$duration_ms" 'BEGIN{printf "%.3f",ms/1000}')" "$status"
 }
 
 vw_perf_stage_begin() {

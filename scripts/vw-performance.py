@@ -20,9 +20,13 @@ STAGE_LABELS = {
     "sqlite_quick_check": "SQLite quick_check",
     "snapshot_tar_age": "完整 /data 快照与 age 加密",
     "container_start_command": "Docker 启动命令",
-    "container_health_check_wait": "启动后健康检查等待",
+    "container_health_check_wait": "启动后健康检查等待（汇总）",
+    "readiness_probe_first_success": "首次 Vaultwarden /alive 主动探测",
+    "readiness_probe_confirmation": "第二次主动探测确认（含探测间隔）",
+    "docker_native_health_observation": "Docker 原生 Health 状态读取",
+    "docker_native_health_poll_wait": "兼容模式：Docker 原生 Health 等待",
     "recovery_container_start_command": "异常恢复：Docker 启动命令",
-    "recovery_health_check_wait": "异常恢复：健康检查等待",
+    "recovery_health_check_wait": "异常恢复：健康检查等待（汇总）",
     "local_validation_manifest_checksum": "本地校验/清单加密/SHA256",
     "github_sync_retention_push_verify": "GitHub同步/推送/远端核验",
     "github_clone_and_list": "GitHub克隆与备份列表",
@@ -34,13 +38,13 @@ STAGE_LABELS = {
     "replace_production_data": "替换生产数据",
     "container_start_health_check": "旧版：恢复后启动/健康检查",
     "restore_container_start_command": "恢复后 Docker 启动命令",
-    "restore_health_check_wait": "恢复后健康检查等待",
+    "restore_health_check_wait": "恢复后健康检查等待（汇总）",
     "cleanup_container_start_command": "清理阶段 Docker 启动命令",
-    "cleanup_health_check_wait": "清理阶段健康检查等待",
+    "cleanup_health_check_wait": "清理阶段健康检查等待（汇总）",
     "restore_rollback_container_stop": "恢复失败：停止容器",
     "restore_rollback_previous_data": "恢复失败：回滚原数据",
     "restore_rollback_container_start": "恢复失败：重新启动命令",
-    "restore_rollback_health_wait": "恢复失败：回滚健康检查",
+    "restore_rollback_health_wait": "恢复失败：回滚健康检查（汇总）",
     "restore_rollback_unhealthy_container_stop": "回滚后健康失败：停止容器",
     "TOTAL": "总耗时",
 }
@@ -78,7 +82,7 @@ def main():
             print(f"性能记录文件存在，但目前只有表头或没有有效记录：{path}")
         else:
             print(f"尚无性能记录文件：{path}")
-        print("v1.4.3 会分别记录容器停止、SQLite 检查、快照加密、Docker 启动命令和健康检查等待。")
+        print("v1.4.4 会记录容器停止、SQLite 检查、快照加密、Docker 启动命令，以及 Vaultwarden 主动 /healthcheck.sh 探测阶段。")
         print("systemd 后台任务使用 /usr/local/sbin/vw-backup.sh；项目更新后请先运行菜单 07 同步后台脚本。")
         print("完成一次手动备份或恢复后，请检查日志中是否出现 [性能] 和 [耗时] 行。")
         return 0
@@ -147,8 +151,10 @@ def main():
                 print(f"{label:38} {fmt(row['duration_ms']):>12} {pct:8.1f}% {row['status']:>10}")
             bottleneck = max(latest_rows, key=lambda r: r["duration_ms"])
             print(f"主要耗时阶段：{STAGE_LABELS.get(bottleneck['stage'], bottleneck['stage'])}（{fmt(bottleneck['duration_ms'])}）")
-    print("\n提示：v1.4.3 将容器停止、SQLite 检查、快照加密、Docker 启动命令和健康检查等待拆开计时。")
-    print("GitHub 同步/推送耗时主要受 VPS 到 GitHub 的网络影响；健康检查等待主要受应用启动和 Docker Healthcheck 状态影响。")
+    print("\n提示：v1.4.4 对 Vaultwarden 官方 /healthcheck.sh 使用主动探测：默认每 2 秒检查，连续 2 次成功后即确认就绪，最多等待 120 秒。")
+    print("Docker 原生 Healthcheck 配置不会被修改；其状态可能要等到原生 60 秒周期后才从 starting 更新。")
+    print("父级健康检查行标记为 aggregate，仅作总等待参考，不会和主动探测子阶段重复计入阶段平均值/占比。")
+    print("GitHub 同步/推送耗时主要受 VPS 到 GitHub 的网络影响；主动健康探测耗时反映 Vaultwarden /alive 实际就绪时间。")
     print("总耗时包含交互式操作等待时间；分析纯处理性能时，请重点比较各阶段耗时。")
     print("性能文件仅记录阶段名称、时长、状态和字节数，不记录密码或 Token。")
     return 0

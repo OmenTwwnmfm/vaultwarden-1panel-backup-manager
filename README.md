@@ -10,7 +10,7 @@
 ![Panel](https://img.shields.io/badge/panel-1Panel-1677ff)
 ![Encryption](https://img.shields.io/badge/encryption-age-16a34a)
 ![Scheduler](https://img.shields.io/badge/scheduler-systemd-6d28d9)
-![Version](https://img.shields.io/badge/version-1.4.3-blue)
+![Version](https://img.shields.io/badge/version-1.4.4-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 </div>
@@ -38,7 +38,7 @@ Vaultwarden 将用户密码库保存在自己的服务器上，因此需要可�
 - **历史趋势**：汇总最近 20 次操作，按最近 30 次操作计算各阶段平均耗时与最大耗时，帮助判断瓶颈是在 VPS 磁盘/CPU 还是 GitHub 网络。
 - **CSV 导出**：可将性能历史导出为 CSV，便于用 Excel 分析。
 - **隐私保护**：性能记录只包含时间、操作类型、运行 ID、阶段、耗时、状态和字节数，不保存密码、Token、私钥或数据库内容。
-- 记录文件：`/var/lib/vaultwarden-backup/performance.tsv`，权限为 root 专用。v1.4.2 起，菜单内手动备份会直接调用当前项目目录中的计时版 worker；systemd 任务仍调用 `/usr/local/sbin/vw-backup.sh`，更新源码后需通过菜单 07 同步后台脚本。v1.4.3 起，容器停止、SQLite 检查、快照加密、Docker 启动命令、启动后健康检查等待均单独记录。
+- 记录文件：`/var/lib/vaultwarden-backup/performance.tsv`，权限为 root 专用。v1.4.2 起，菜单内手动备份会直接调用当前项目目录中的计时版 worker；systemd 任务仍调用 `/usr/local/sbin/vw-backup.sh`，更新源码后需通过菜单 07 同步后台脚本。v1.4.4 起，Vaultwarden 官方 `/healthcheck.sh` 使用主动探测，并分别记录首次成功、连续确认和 Docker 原生 Health 状态读取；父级健康检查耗时仅作为 aggregate 汇总，不重复计入阶段平均值。
 - **瓶颈定位**：性能摘要会显示最近一次运行的阶段耗时占比与最大耗时阶段。若 `启动后健康检查等待` 很高，说明时间花在容器启动后的 Docker Healthcheck 等待，而不是 tar/age；请结合 `docker inspect` 的 Healthcheck 配置与历史状态判断，不要为了速度直接跳过健康检查。
 
 
@@ -58,7 +58,7 @@ Vaultwarden 将用户密码库保存在自己的服务器上，因此需要可�
 - **age 公钥加密**：服务器日常备份只需 age 公钥；age 私钥建议离线保存，不需要长期放在 VPS。
 - **SHA256 与远端提交核验**：校验本地文件，并在 GitHub 推送后比较本地与远端分支提交 ID。
 - **GitHub 推送重试**：遇到临时网络错误时按配置重试；不会使用 `--force` 覆盖远程历史。
-- **健康检查与磁盘阈值**：备份前检查剩余磁盘空间，创建快照后等待容器恢复到 running/healthy。
+- **主动健康探测与磁盘阈值**：备份前检查剩余磁盘空间。容器启动后，若 Docker Healthcheck 配置为 Vaultwarden 官方 `/healthcheck.sh`，管理器会在容器内每 2 秒主动执行同一个探针，连续 2 次成功即确认应用就绪，最长等待 120 秒，单次探测另有 12 秒超时保护；不修改 1Panel 管理的 Docker Healthcheck。非标准镜像回退到 Docker 原生状态轮询。
 
 ### 自动化运维（不依赖 1Panel 计划任务）
 
@@ -73,7 +73,7 @@ Vaultwarden 将用户密码库保存在自己的服务器上，因此需要可�
 
 - **交互式恢复**：从 GitHub 选择历史备份，检查 SHA256、age 私钥匹配、tar 清单和 SQLite 数据库，再进入恢复步骤。
 - **恢复前回滚**：替换生产数据之前，先把当前 `/data` 加密保存为本地回滚快照；失败时尝试自动回滚。
-- **恢复后健康检查**：启动容器后等待 running/healthy；未通过时尝试回滚到恢复前快照。
+- **恢复后健康检查**：启动容器后优先主动执行 Vaultwarden `/healthcheck.sh`，每 2 秒探测一次、连续两次成功后立即继续；单次探测有 12 秒超时、总等待上限 120 秒。未通过时仍按安全策略尝试回滚到恢复前快照。
 - **恢复演练**：在临时目录解密并检查历史备份，不修改生产数据。
 - **历史备份管理**：列出 GitHub 当前分支中的备份，支持永久保留标记、取消标记和删除当前分支文件；自动过期清理会跳过已保护备份，并明确提醒 Git 历史仍可能保留旧对象。
 - **部署清单**：每次备份生成一份经过脱敏的 1Panel/Docker 部署清单，并用同一 age 公钥加密；可在灾难恢复时查看。
@@ -362,4 +362,4 @@ vbm
 
 ### 性能记录为空时怎么办？
 
-如果菜单 20 显示没有性能记录，手动备份会优先执行当前源码目录中的计时版 worker，并显式使用同一份 `vw-common.sh`。请在备份日志中确认出现 `[性能] 已启用阶段耗时记录` 和 `[耗时]` 行。systemd 使用系统安装版 worker；更新源码后请先执行菜单 `[07]` 同步后台脚本。性能记录位于 `/var/lib/vaultwarden-backup/performance.tsv`。v1.4.3 起，备份的“容器停止”“SQLite 检查”“快照加密”“Docker 启动命令”“健康检查等待”分别计时；恢复也会分别记录启动命令和健康检查等待。旧版本聚合记录仍保留，不能追溯拆分。
+如果菜单 20 显示没有性能记录，手动备份会优先执行当前源码目录中的计时版 worker，并显式使用同一份 `vw-common.sh`。请在备份日志中确认出现 `[性能] 已启用阶段耗时记录` 和 `[耗时]` 行。systemd 使用系统安装版 worker；更新源码后请先执行菜单 `[07]` 同步后台脚本。性能记录位于 `/var/lib/vaultwarden-backup/performance.tsv`。v1.4.3 起，备份的“容器停止”“SQLite 检查”“快照加密”“Docker 启动命令”“健康检查等待”分别计时；v1.4.4 进一步拆分主动探测首次成功、连续成功确认及 Docker 原生状态观察。旧版本聚合记录仍保留，不能追溯拆分。

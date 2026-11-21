@@ -37,7 +37,7 @@ for stage in restore_container_stop rollback_snapshot_encrypt_validate restore_c
 done
 echo "PASS: backup and restore workers contain the split performance stages"
 REPORT=$(python3 "$ROOT/scripts/vw-performance.py" "$VW_PERF_FILE")
-for expected in "停止 Vaultwarden 容器" "SQLite quick_check" "完整 /data 快照与 age 加密" "Docker 启动命令" "启动后健康检查等待" "主要耗时阶段"; do
+for expected in "停止 Vaultwarden 容器" "SQLite quick_check" "完整 /data 快照与 age 加密" "Docker 启动命令" "启动后健康检查等待（汇总）" "主要耗时阶段"; do
   grep -q "$expected" <<<"$REPORT" || { echo "FAIL: report missing label: $expected" >&2; exit 1; }
 done
 echo "PASS: performance report includes stage breakdown and bottleneck"

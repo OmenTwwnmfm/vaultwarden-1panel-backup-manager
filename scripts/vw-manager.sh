@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION="1.4.3"
+VERSION="1.4.4"
 CONFIG_FILE="/etc/vaultwarden-backup.conf"
 BACKUP_SCRIPT="/usr/local/sbin/vw-backup.sh"
 RESTORE_SCRIPT="/usr/local/sbin/vw-restore-prepare.sh"
@@ -77,7 +77,7 @@ require_docker() {
 
 install_dependencies() {
   local missing=() pkg
-  for cmd in age age-keygen git ssh-keygen ssh-keyscan sha256sum tar gzip flock sqlite3 python3 logrotate; do
+  for cmd in age age-keygen git ssh-keygen ssh-keyscan sha256sum tar gzip flock sqlite3 python3 logrotate timeout; do
     command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
   done
   if ((${#missing[@]} == 0)); then
@@ -571,12 +571,12 @@ restore_from_github() (
           stopped_by_script=0
           vw_perf_stage_end success
           vw_perf_stage_begin "cleanup_health_check_wait"
-          if vw_wait_healthy "$container" 30 2; then
-            vw_perf_stage_end success
-            echo "安全清理：Vaultwarden 已重新启动并通过健康检查：$container"
+          if vw_wait_healthy "$container" 120 2 2; then
+            vw_perf_stage_end aggregate
+            echo "安全清理：Vaultwarden 已重新启动并通过主动健康探测：$container"
           else
-            vw_perf_stage_end failed
-            echo "严重提醒：容器已启动，但未通过健康检查。请进入 1Panel 检查：$container" >&2
+            vw_perf_stage_end aggregate
+            echo "严重提醒：容器已启动，但未通过健康探测。请进入 1Panel 检查：$container" >&2
           fi
         else
           vw_perf_stage_end failed
@@ -800,12 +800,12 @@ restore_from_github() (
     fi
     if [[ "$start_choice" != "start_failed" ]]; then
       vw_perf_stage_begin "restore_health_check_wait"
-      if vw_wait_healthy "$container" 30 2; then
-        vw_perf_stage_end success
-        ok "Vaultwarden 已启动并达到 running/healthy 状态。"
+      if vw_wait_healthy "$container" 120 2 2; then
+        vw_perf_stage_end aggregate
+        ok "恢复后的 Vaultwarden 已通过连续主动健康探测。"
       else
-        vw_perf_stage_end failed
-        err "恢复后的实例未通过健康检查，准备回滚到恢复前数据。"
+        vw_perf_stage_end aggregate
+        err "恢复后的实例未通过主动健康探测，准备回滚到恢复前数据。"
         start_choice="health_failed"
       fi
     fi
@@ -835,11 +835,11 @@ restore_from_github() (
           stopped_by_script=0
           vw_perf_stage_end success
           vw_perf_stage_begin "restore_rollback_health_wait"
-          if vw_wait_healthy "$container" 30 2; then
-            vw_perf_stage_end success
+          if vw_wait_healthy "$container" 120 2 2; then
+            vw_perf_stage_end aggregate
             warn "已自动回滚到恢复前数据并成功启动。原回滚文件仍保留：$rollback_archive"
           else
-            vw_perf_stage_end failed
+            vw_perf_stage_end aggregate
             data_change_started=0
             vw_perf_stage_begin "restore_rollback_unhealthy_container_stop"
             if docker stop --time 20 "$container" >/dev/null 2>&1; then
@@ -1009,13 +1009,9 @@ restore_rehearsal() (
     --label "com.vw-backup-manager.restore-drill=true" \
     --mount "type=bind,src=$staging/data,dst=/data" "$image" >/dev/null || { err "临时容器创建失败。"; return 1; }
   local passed=0
-  for ((i=1; i<=30; i++)); do
-    state=$(docker inspect -f '{{.State.Status}}' "$test_name" 2>/dev/null || echo missing)
-    health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' "$test_name" 2>/dev/null || echo unknown)
-    if [[ "$state" == running && ( "$health" == healthy || "$health" == no-healthcheck ) ]]; then passed=1; break; fi
-    [[ "$state" == exited || "$state" == dead || "$state" == missing ]] && break
-    sleep 2
-  done
+  if vw_wait_healthy "$test_name" 120 2 2; then passed=1; fi
+  state=$(docker inspect -f '{{.State.Status}}' "$test_name" 2>/dev/null || echo missing)
+  health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' "$test_name" 2>/dev/null || echo unknown)
   echo
   echo "临时容器状态：$state；健康检查：$health"
   echo "临时容器启动日志："
@@ -1347,7 +1343,7 @@ performance_monitor() {
   [[ -f "$tool" ]] || { err "找不到性能分析工具，请从项目目录运行菜单 07 更新脚本。"; pause; return 1; }
   if [[ ! -f "$perf_file" ]]; then
     warn "尚未找到性能记录文件：$perf_file"
-    echo "v1.4.3 已拆分容器停止、SQLite 检查、快照加密、容器启动命令和健康检查等待等阶段。"
+    echo "v1.4.4 已增加 Vaultwarden /healthcheck.sh 主动探测计时，默认每 2 秒检查并要求连续 2 次成功。"
     echo "systemd 自动备份使用系统安装版 worker；更新项目后请先执行菜单 07 同步后台脚本。"
     echo "完成一次成功或失败的手动备份/恢复后，再返回此处查看性能记录。"
     pause

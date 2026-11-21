@@ -37,7 +37,7 @@ NOTIFY_ON_FAILURE="${NOTIFY_ON_FAILURE:-true}"
 
 required_vars=(CONTAINER DATA_DIR AGE_RECIPIENT GITHUB_REPO GITHUB_BRANCH GITHUB_SSH_KEY BACKUP_DIR REPO_DIR RETENTION_DAYS MAX_FILE_MIB)
 for var in "${required_vars[@]}"; do [[ -n "${!var:-}" ]] || { echo "ERROR: Config value $var is empty."; exit 1; }; done
-for cmd in docker age git sha256sum stat readlink find cp flock date tar gzip awk head du df python3 sqlite3; do
+for cmd in docker age git sha256sum stat readlink find cp flock date tar gzip awk head du df python3 sqlite3 timeout; do
   command -v "$cmd" >/dev/null 2>&1 || { echo "ERROR: Required command missing: $cmd"; exit 1; }
 done
 [[ -f "$MANIFEST_TOOL" ]] || { echo "ERROR: Missing deployment manifest tool: $MANIFEST_TOOL"; exit 1; }
@@ -82,17 +82,8 @@ write_result() {
 }
 
 wait_container_healthy() {
-  local name="$1" i state health
-  for i in $(seq 1 30); do
-    state=$(docker inspect -f '{{.State.Status}}' "$name" 2>/dev/null || echo missing)
-    health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' "$name" 2>/dev/null || echo unknown)
-    [[ "$state" == running ]] || { sleep 2; continue; }
-    [[ "$health" == unhealthy ]] && { sleep 2; continue; }
-    [[ "$health" == starting ]] && { sleep 2; continue; }
-    return 0
-  done
-  echo "ERROR: Container did not reach running/healthy state after start (last state=$state health=$health)."
-  return 1
+  local name="$1" timeout_s="${2:-120}" delay_s="${3:-2}" consecutive="${4:-2}"
+  vw_wait_healthy "$name" "$timeout_s" "$delay_s" "$consecutive"
 }
 
 on_exit() {
@@ -105,11 +96,12 @@ on_exit() {
       STOPPED=0
       vw_perf_stage_end success
       vw_perf_stage_begin "recovery_health_check_wait"
-      if wait_container_healthy "$CONTAINER"; then
-        vw_perf_stage_end success
+      local health_rc=0
+      if wait_container_healthy "$CONTAINER" 120 2 2; then health_rc=0; else health_rc=$?; fi
+      vw_perf_stage_end aggregate
+      if (( health_rc == 0 )); then
         echo "Vaultwarden restart succeeded."
       else
-        vw_perf_stage_end failed
         echo "CRITICAL: Vaultwarden could not be confirmed healthy. Start/check it in 1Panel immediately."
         vw_notify failure "CRITICAL: Vaultwarden backup task failed and container $CONTAINER could not be confirmed healthy. Check 1Panel immediately."
         rc=1
@@ -218,8 +210,10 @@ STOPPED=0
 vw_perf_stage_end success
 
 vw_perf_stage_begin "container_health_check_wait"
-if ! wait_container_healthy "$CONTAINER"; then FAILURE_REASON="container did not become healthy after snapshot"; vw_perf_stage_end failed; exit 1; fi
-vw_perf_stage_end success
+health_rc=0
+if wait_container_healthy "$CONTAINER" 120 2 2; then health_rc=0; else health_rc=$?; fi
+vw_perf_stage_end aggregate
+if (( health_rc != 0 )); then FAILURE_REASON="container did not pass active health probes after snapshot"; exit 1; fi
 vw_perf_stage_begin "local_validation_manifest_checksum"
 
 echo "Vaultwarden is running; continuing offline validation and GitHub upload."

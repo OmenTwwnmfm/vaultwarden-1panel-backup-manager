@@ -1,3 +1,13 @@
+## v1.4.4 - 主动健康探测与恢复耗时优化
+
+- 修复恢复/备份完成后被动等待 Docker 原生 Healthcheck 60 秒调度间隔的问题。对于配置为 `/healthcheck.sh` 的 Vaultwarden 官方镜像，管理器直接在容器内执行同一个健康检查脚本，每 2 秒探测一次，连续 2 次成功后立即判定应用就绪，默认最大等待 120 秒。
+- 不修改 1Panel 管理的容器、镜像或 Docker Healthcheck 配置；Docker 原生 Healthcheck 继续运行。主动探测确认后，会记录当时 Docker 原生状态（例如 `starting`），不会为了等待该状态更新而额外空等一个 60 秒周期。
+- 对未使用 `/healthcheck.sh` 的自定义镜像保留 Docker 原生 Health 状态轮询兼容路径；无 Healthcheck 的容器只报告 `running`，并明确提示无法证明 HTTP 应用可用。
+- 性能记录增加首次主动探测成功、第二次主动探测确认、Docker 原生 Health 状态读取等阶段；原来的 `container_health_check_wait` / `restore_health_check_wait` 保留为 `aggregate` 汇总行，分析器不会把汇总行与子阶段重复计入平均值和占比。
+- 备份主流程、备份失败后的自动重启、恢复后启动、失败回滚后的重启、安全清理重启和隔离恢复演练统一使用主动健康探测。
+- 默认探测参数：每 2 秒一次、连续成功 2 次、最长 120 秒；单次 `docker exec /healthcheck.sh` 使用 12 秒外部超时保护。失败会保持现有失败处理/恢复前快照回滚逻辑，不会跳过健康检查。
+- 增加主动健康探测模拟测试，覆盖 Docker 原生状态仍为 `starting`、但容器内 `/healthcheck.sh` 已连续成功的情况。
+
 ## v1.4.3 - 性能阶段拆分与健康检查瓶颈定位
 
 - 备份计时拆分为：停止容器、SQLite `quick_check`、完整 `/data` tar+age 快照、Docker 启动命令、启动后健康检查等待；GitHub 同步、校验等原有阶段保持独立。
