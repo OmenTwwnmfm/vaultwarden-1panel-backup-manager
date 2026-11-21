@@ -84,27 +84,6 @@ chmod 600 /root/vw-age-identity.txt
 
 不要把私钥内容粘贴到 Issue、Discussion、聊天记录或仓库文件中。
 
-## 将本项目上传到 GitHub
-
-建议先在 GitHub 创建一个专门存放**项目源码和文档**的仓库，例如 `vaultwarden-1panel-backup-toolkit`。首次建议设为 Private；检查确认仓库没有任何个人域名、真实路径、访问令牌、私钥或其他敏感信息后，再自行决定是否公开。
-
-在本项目根目录（包含 `README.md` 的目录）执行：
-
-```bash
-git init -b main
-git add README.md .gitignore scripts/ docs/
-git status --short
-```
-
-先检查 `git status --short` 列出的文件，确认没有真实配置文件、密码、Token、SSH 私钥、age 私钥或 `.age` 备份，再提交：
-
-```bash
-git commit -m "Add 1Panel Vaultwarden backup and restore toolkit"
-git remote add origin git@github.com:你的用户名/vaultwarden-1panel-backup-toolkit.git
-git push -u origin main
-```
-
-上面的仓库是**项目源码仓库**。自动备份脚本使用的 `GITHUB_REPO` 则必须指向另一个单独创建的、保持空白的 **Private 备份仓库**（例如 `vaultwarden-backup`）。两个仓库不要混用。
 
 ## 推荐：使用交互式管理器（新手优先）
 
