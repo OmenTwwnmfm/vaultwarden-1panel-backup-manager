@@ -849,7 +849,7 @@ restore_from_github() (
   staging="/var/lib/vaultwarden-restore-staging-$timestamp"
   if [[ -e "$staging" ]]; then err "暂存目录已存在：$staging"; rm -rf -- "$temp_root"; return 1; fi
   vw_perf_stage_begin "restore_decrypt_validate"
-  if ! VW_MIN_FREE_MB="${MIN_FREE_MB:-512}" bash "$RESTORE_SCRIPT" "$archive" "$identity" "$staging"; then
+  if ! VW_MIN_FREE_MB="${MIN_FREE_MB:-512}" VW_STORAGE_TOOL="$STORAGE_TOOL" bash "$RESTORE_SCRIPT" "$archive" "$identity" "$staging"; then
     err "校验或解密失败。原 Vaultwarden 数据尚未修改。"
     rm -rf -- "$staging" "$temp_root"
     return 1
@@ -1154,7 +1154,7 @@ verify_github_backup() (
   echo
   echo "第 3 项：实际解密、读取归档目录"
   staging="$temp_root/staging"
-  VW_MIN_FREE_MB="${MIN_FREE_MB:-512}" bash "$RESTORE_SCRIPT" "$archive" "$identity" "$staging" || { err "解密或归档检查失败。"; return 1; }
+  VW_MIN_FREE_MB="${MIN_FREE_MB:-512}" VW_STORAGE_TOOL="$STORAGE_TOOL" bash "$RESTORE_SCRIPT" "$archive" "$identity" "$staging" || { err "解密或归档检查失败。"; return 1; }
   echo
   echo "第 4 项：检查关键数据文件"
   [[ -s "$staging/data/db.sqlite3" ]] || { err "数据库缺失或为空。"; return 1; }
@@ -1214,7 +1214,7 @@ restore_rehearsal() (
   pub=$(age-keygen -y "$identity") || { err "无法读取 age 私钥。"; return 1; }
   [[ "$pub" == "$AGE_RECIPIENT" ]] || { err "此私钥与配置中的 AGE_RECIPIENT 不匹配。"; return 1; }
   staging="$temp_root/staging"
-  VW_MIN_FREE_MB="${MIN_FREE_MB:-512}" bash "$RESTORE_SCRIPT" "$archive" "$identity" "$staging" || { err "备份解密或 SQLite 检查失败。"; return 1; }
+  VW_MIN_FREE_MB="${MIN_FREE_MB:-512}" VW_STORAGE_TOOL="$STORAGE_TOOL" bash "$RESTORE_SCRIPT" "$archive" "$identity" "$staging" || { err "备份解密或 SQLite 检查失败。"; return 1; }
   test_name="vw-restore-drill-$(date +%Y%m%d%H%M%S)-$$"
   echo
   echo "========== 隔离恢复演练计划 =========="

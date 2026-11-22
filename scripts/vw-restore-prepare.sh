@@ -15,8 +15,9 @@ IDENTITY=$(readlink -f -- "$2")
 STAGING="$3"
 ARCHIVE_CHECK_TOOL="${VW_ARCHIVE_CHECK_TOOL:-$(dirname -- "${BASH_SOURCE[0]}")/vw-archive-check.py}"
 [[ -f "$ARCHIVE_CHECK_TOOL" ]] || ARCHIVE_CHECK_TOOL="/usr/local/libexec/vw-archive-check.py"
-STORAGE_TOOL="$(dirname -- "${BASH_SOURCE[0]}")/vw-storage.py"
+STORAGE_TOOL="${VW_STORAGE_TOOL:-$(dirname -- "${BASH_SOURCE[0]}")/vw-storage.py}"
 [[ -f "$STORAGE_TOOL" ]] || STORAGE_TOOL="/usr/local/libexec/vw-storage.py"
+[[ -f "$STORAGE_TOOL" ]] || { echo "错误：找不到备份校验工具 vw-storage.py。请从完整项目目录运行菜单 07 更新后台脚本。" >&2; exit 1; }
 
 [[ -f "$ARCHIVE" ]] || { echo "错误：找不到备份文件：$ARCHIVE" >&2; exit 1; }
 [[ -f "$IDENTITY" ]] || { echo "错误：找不到 age 私钥文件：$IDENTITY" >&2; exit 1; }

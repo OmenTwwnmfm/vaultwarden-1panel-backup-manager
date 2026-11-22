@@ -44,7 +44,7 @@ Vaultwarden 将用户密码库保存在自己的服务器上，因此需要可�
 
 WebDAV 支持独立配置。首次向导 `[01]` 可选择 `webdav`，已有 GitHub 配置可直接通过 `[24]` 添加 WebDAV。手动 `[02]` 上传 GitHub，`[25]` 上传 WebDAV。定时任务和升级前备份使用 `BACKUP_TARGET`，旧配置默认 `github`。
 
-WebDAV 使用已有 age 公钥加密完整 `/data` 和部署清单。服务器应支持 `PROPFIND`、`GET`、`PUT`、`MOVE`、`DELETE`，并提供已创建的专用 HTTPS 目录。支持用户名与密码或应用密码，凭据单独保存于 root 所有、权限 `600` 的 `/etc/vaultwarden-webdav.json`。上传先生成临时文件，回读并计算 SHA256 后用 `MOVE` 发布，SHA256 文件最后发布。同名同内容可重复补传，同名不同内容会停止。上传成功要求再次回读核验。
+WebDAV 使用已有 age 公钥加密完整 `/data` 和部署清单。备份只写入填写目录下独立的 `vbm/` 子目录；若 URL 已以 `vbm/` 结尾则直接使用该目录，不会再嵌套一层。该目录可在有父级写权限时由 WebDAV 自动创建。服务器应支持 `PROPFIND`、`MKCOL`、`GET`、`PUT`、`MOVE`、`DELETE`，并使用 HTTPS。支持用户名与密码或应用密码，凭据单独保存于 root 所有、权限 `600` 的 `/etc/vaultwarden-webdav.json`。上传先生成临时文件，回读并计算 SHA256 后用 `MOVE` 发布，SHA256 文件最后发布。同名同内容可重复补传，同名不同内容会停止。上传成功要求再次回读核验。
 
 本地默认目录为 `/var/backups/vaultwarden`。`vw-*.tar.gz.age` 是常规数据备份，`pre-restore-*.tar.gz.age` 是恢复前数据快照，`.manifest.json.age` 是加密部署清单，`.sha256` 是对应校验文件。每组通常包含两至四个文件。GitHub 网页删除远端文件后，可用 `[22]` 单独清理本地备份。原有 `[16]` 删除 GitHub 备份成功后，也会清理其匹配的本地文件。
 

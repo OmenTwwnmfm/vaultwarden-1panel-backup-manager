@@ -55,10 +55,23 @@ class DAVHandler(http.server.BaseHTTPRequestHandler):
         if not self.authorized():
             return
         self.rfile.read(int(self.headers.get("Content-Length", "0")))
-        if self.headers.get("Depth") != "1" or urllib.parse.unquote(self.path) != self.server.base:
+        if urllib.parse.unquote(self.path) != self.server.base:
             self.send_error(400)
             return
         root = ET.Element("{DAV:}multistatus")
+        if self.headers.get("Depth") == "0":
+            response = ET.SubElement(root, "{DAV:}response")
+            ET.SubElement(response, "{DAV:}href").text = urllib.parse.quote(self.server.base)
+            propstat = ET.SubElement(response, "{DAV:}propstat")
+            ET.SubElement(propstat, "{DAV:}status").text = "HTTP/1.1 200 OK"
+            prop = ET.SubElement(propstat, "{DAV:}prop")
+            resource = ET.SubElement(prop, "{DAV:}resourcetype")
+            ET.SubElement(resource, "{DAV:}collection")
+            self.send_content(207, ET.tostring(root))
+            return
+        if self.headers.get("Depth") != "1":
+            self.send_error(400)
+            return
         for name in self.server.files:
             response = ET.SubElement(root, "{DAV:}response")
             ET.SubElement(response, "{DAV:}href").text = urllib.parse.quote(self.server.base + name)
@@ -229,7 +242,7 @@ class WebDAVTests(unittest.TestCase):
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), DAVHandler)
         self.server.files = {}
         self.server.requests = []
-        self.server.base = "/备份 files/"
+        self.server.base = "/备份 files/vbm/"
         self.server.authorization = "Basic " + base64.b64encode("user:secret-value".encode()).decode()
         self.server.corrupt = False
         self.server.readonly = False
@@ -238,6 +251,7 @@ class WebDAVTests(unittest.TestCase):
         self.thread.start()
         self.config = {"url": f"http://127.0.0.1:{self.server.server_port}/%E5%A4%87%E4%BB%BD%20files/", "username": "user", "secret": "secret-value"}
         self.client = storage.WebDAV(self.config)
+        self.client.path = urllib.parse.quote(self.server.base, safe="/")
 
     def tearDown(self):
         self.server.shutdown()
@@ -246,6 +260,8 @@ class WebDAVTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def test_upload_list_download_and_idempotent_retry(self):
+        self.assertTrue(self.client.path.endswith("/vbm/"))
+        self.client.ensure_directory()
         manifest = NAME.removesuffix(".tar.gz.age") + ".manifest.json.age"
         make_pair(self.directory, manifest)
         self.client.upload(self.archive)
@@ -322,6 +338,11 @@ class WebDAVTests(unittest.TestCase):
         for url in ("http://example.com/backups/", "https://user@example.com/", "https://example.com/../root", "https://example.com/?token=hidden"):
             with self.assertRaises(ValueError):
                 storage.WebDAV(dict(self.config, url=url))
+
+    def test_existing_vbm_url_is_not_nested_again(self):
+        client = storage.WebDAV(dict(self.config, url=self.config["url"] + "vbm/"))
+        self.assertTrue(client.path.endswith("/vbm/"))
+        self.assertFalse(client.path.endswith("/vbm/vbm/"))
 
     def test_rollback_archive_roundtrip(self):
         archive = make_pair(self.directory, ROLLBACK)

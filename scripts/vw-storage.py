@@ -170,6 +170,9 @@ class WebDAV:
             raise ValueError("WebDAV 目录路径无效")
         if re.search(r"%[a-fA-F0-9]{2}", decoded):
             raise ValueError("WebDAV 目录路径不接受多重编码")
+        components = [part for part in decoded.split("/") if part]
+        if not components or components[-1] != "vbm":
+            decoded = decoded.rstrip("/") + "/vbm"
         self.parsed = parsed
         self.path = urllib.parse.quote(decoded.rstrip("/") + "/", safe="/")
         if self.path in ("/", ""):
@@ -212,7 +215,32 @@ class WebDAV:
         finally:
             connection.close()
 
+    def ensure_directory(self):
+        body = b'<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/></d:prop></d:propfind>'
+        headers = {"Depth": "0", "Content-Type": "application/xml"}
+        try:
+            content = self.small_request("PROPFIND", body=body, headers=headers)
+        except WebDAVStatusError as error:
+            if error.status != 404:
+                raise
+            try:
+                self.small_request("MKCOL")
+            except WebDAVStatusError as create_error:
+                if create_error.status not in (405, 409):
+                    raise
+            content = self.small_request("PROPFIND", body=body, headers=headers)
+        if b"<!DOCTYPE" in content.upper() or b"<!ENTITY" in content.upper():
+            raise ValueError("WebDAV XML 包含不受支持的声明")
+        root = ET.fromstring(content)
+        collection = any(
+            resource is not None and resource.find("{DAV:}collection") is not None
+            for resource in root.findall(".//{DAV:}resourcetype")
+        )
+        if root.tag != "{DAV:}multistatus" or not collection:
+            raise ValueError("WebDAV vbm 目录不存在或不是集合")
+
     def list_archives(self):
+        self.ensure_directory()
         body = b'<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/></d:prop></d:propfind>'
         content = self.small_request("PROPFIND", body=body, headers={"Depth": "1", "Content-Type": "application/xml"}, limit=8 * 1024 * 1024)
         if b"<!DOCTYPE" in content.upper() or b"<!ENTITY" in content.upper():
@@ -383,6 +411,7 @@ def configure_webdav(path):
         raise ValueError("配置输入格式无效")
     config = dict(zip(("url", "username", "secret"), fields[:3]))
     client = WebDAV(config)
+    client.ensure_directory()
     client.list_archives()
     path = Path(path)
     if path.is_symlink():
