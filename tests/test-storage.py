@@ -308,6 +308,31 @@ class WebDAVTests(unittest.TestCase):
         self.client.upload(self.archive)
         self.assertEqual(self.client.list_archives(), [NAME])
 
+    def test_manifest_can_be_listed_and_downloaded_without_archive(self):
+        manifest, checksum = storage.members_for(NAME)[2:]
+        payload = b"encrypted manifest" * 400
+        make_pair(self.directory, manifest, payload)
+        for name in (manifest, checksum):
+            self.server.files[name] = (self.directory / name).read_bytes()
+        self.assertEqual(self.client.list_archives(manifests=True), [manifest])
+        self.assertEqual(self.client.list_archives(), [])
+        destination = self.directory / "download"
+        result = self.client.download_manifest(NAME, destination)
+        self.assertEqual(result.read_bytes(), payload)
+        storage.verify_member(result)
+        with self.assertRaises(FileExistsError):
+            self.client.download_manifest(NAME, destination)
+        self.assertEqual(result.read_bytes(), payload)
+        self.server.files[manifest] = b"broken"
+        with self.assertRaisesRegex(ValueError, "SHA256"):
+            self.client.download_manifest(NAME, self.directory / "corrupt")
+
+    def test_history_delete_removes_only_selected_group(self):
+        for name in (*storage.members_for(NAME), *storage.members_for(ROLLBACK)):
+            self.server.files[name] = b"payload"
+        self.client.delete_remote(NAME)
+        self.assertEqual(set(self.server.files), set(storage.members_for(ROLLBACK)))
+
     def test_conflicting_remote_file_is_preserved(self):
         self.server.files[NAME] = b"existing different data"
         with self.assertRaisesRegex(ValueError, "同名"):

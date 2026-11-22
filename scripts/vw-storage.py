@@ -24,6 +24,7 @@ MEMBER_PATTERN = re.compile(
 )
 DEFAULT_CONFIG = "/etc/vaultwarden-webdav.json"
 CHUNK_SIZE = 1024 * 1024
+MANIFEST_LIMIT = 1024 * 1024
 
 
 class WebDAVStatusError(ValueError):
@@ -158,11 +159,13 @@ def verify_local(archive):
 
 def verify_member(path):
     path = Path(path)
-    if not regular_file(path) or path.stat().st_size > 4096:
-        raise ValueError("校验文件必须是普通小文件")
+    if not MEMBER_PATTERN.fullmatch(path.name) or not path.name.endswith(".manifest.json.age"):
+        raise ValueError("部署清单文件名无效")
+    if not regular_file(path) or path.stat().st_size > MANIFEST_LIMIT:
+        raise ValueError("部署清单不是普通文件或超过大小限制")
     checksum = Path(str(path) + ".sha256")
-    if not regular_file(checksum):
-        raise ValueError("找不到配套 SHA256 文件")
+    if not regular_file(checksum) or checksum.stat().st_size > 4096:
+        raise ValueError("配套 SHA256 文件缺失或无效")
     expected = checksum_value(checksum.read_bytes(), path.name)
     if file_digest(path) != expected:
         raise ValueError("文件 SHA256 不匹配")
@@ -252,7 +255,7 @@ class WebDAV:
         if root.tag != "{DAV:}multistatus" or not collection:
             raise ValueError("WebDAV vbm 目录不存在或不是集合")
 
-    def list_archives(self):
+    def list_archives(self, *, manifests=False):
         self.ensure_directory()
         body = b'<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/></d:prop></d:propfind>'
         content = self.small_request("PROPFIND", body=body, headers={"Depth": "1", "Content-Type": "application/xml"}, limit=8 * 1024 * 1024)
@@ -282,8 +285,9 @@ class WebDAV:
                 resource = propstat.find("{DAV:}prop/{DAV:}resourcetype")
                 if " 200 " in status_text and resource is not None and len(resource) == 0:
                     names.add(name)
-        archives = (name for name in names if ARCHIVE_PATTERN.fullmatch(name) and name + ".sha256" in names)
-        return sorted(archives, key=lambda name: re.search(r"\d{8}-\d{6}", name)[0], reverse=True)
+        suffix = ".manifest.json.age" if manifests else ".tar.gz.age"
+        matches = (name for name in names if name.endswith(suffix) and name + ".sha256" in names)
+        return sorted(matches, key=lambda name: re.search(r"\d{8}-\d{6}", name)[0], reverse=True)
 
     def remote_digest(self, name):
         connection, response = self.request("GET", name)
@@ -360,7 +364,10 @@ class WebDAV:
         require_archive(name)
         for member in members_for(name):
             try:
-                self.small_request("DELETE", member)
+                connection, response = self.request("DELETE", member)
+                connection.close()
+                if response.status not in (200, 204):
+                    raise WebDAVStatusError("DELETE", response.status)
             except WebDAVStatusError as error:
                 if error.status != 404:
                     raise
@@ -420,29 +427,21 @@ class WebDAV:
         content = self.small_request("GET", checksum)
         expected = checksum_value(content, manifest)
         target = directory / manifest
-        connection, response = self.request("GET", manifest)
+        checksum_path = directory / checksum
+        payload = self.small_request("GET", manifest, limit=MANIFEST_LIMIT)
+        if hashlib.sha256(payload).hexdigest() != expected:
+            raise ValueError("部署清单 SHA256 不匹配")
+        created = []
         try:
-            with target.open("xb") as output:
-                os.chmod(target, 0o600)
-                digest = hashlib.sha256()
-                while chunk := response.read(CHUNK_SIZE):
-                    output.write(chunk)
-                    digest.update(chunk)
-                output.flush()
-                os.fsync(output.fileno())
-            if digest.hexdigest() != expected:
-                raise ValueError("部署清单 SHA256 不匹配")
-            checksum_path = directory / checksum
-            with checksum_path.open("xb") as output:
-                os.chmod(checksum_path, 0o600)
-                output.write(content)
-            verify_member(target)
+            for path, data in ((target, payload), (checksum_path, content)):
+                with path.open("xb") as output:
+                    created.append(path)
+                    os.chmod(path, 0o600)
+                    output.write(data)
         except BaseException:
-            target.unlink(missing_ok=True)
-            (directory / checksum).unlink(missing_ok=True)
+            for path in created:
+                path.unlink(missing_ok=True)
             raise
-        finally:
-            connection.close()
         return target
 
 
@@ -500,6 +499,7 @@ def main():
     listing = commands.add_parser("local-list")
     listing.add_argument("directory")
     listing.add_argument("--archives", action="store_true")
+    listing.add_argument("--manifests", action="store_true")
     deletion = commands.add_parser("local-delete")
     deletion.add_argument("directory")
     deletion.add_argument("name")
@@ -513,7 +513,7 @@ def main():
     member_verify = commands.add_parser("verify-member")
     member_verify.add_argument("member")
     commands.add_parser("configure")
-    commands.add_parser("list")
+    commands.add_parser("list").add_argument("--manifests", action="store_true")
     upload = commands.add_parser("upload")
     upload.add_argument("archive")
     remote_delete = commands.add_parser("remote-delete")
@@ -528,6 +528,11 @@ def main():
     args = parser.parse_args()
     if args.command == "local-list":
         for row in local_sets(args.directory):
+            if args.manifests:
+                manifest = Path(args.directory) / members_for(row["name"])[2]
+                if regular_file(manifest) and regular_file(Path(str(manifest) + ".sha256")):
+                    print(manifest.name)
+                continue
             if args.archives:
                 if row["ready"]:
                     print(row["name"])
@@ -552,7 +557,7 @@ def main():
     else:
         client = WebDAV(load_webdav_config(args.config))
         if args.command == "list":
-            for name in client.list_archives():
+            for name in client.list_archives(manifests=args.manifests):
                 print(name)
         elif args.command == "upload":
             client.upload(Path(args.archive))

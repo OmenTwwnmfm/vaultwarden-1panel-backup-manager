@@ -91,7 +91,7 @@ def main():
         else:
             print(f"尚无性能记录文件：{path}")
         print("v1.4.5 会记录容器停止、SQLite 检查、快照加密、Docker 启动命令、主动健康探测、人工等待和服务停机窗口。")
-        print("systemd 后台任务使用 /usr/local/sbin/vw-backup.sh；项目更新后请先运行菜单 07 同步后台脚本。")
+        print("systemd 后台任务使用 /usr/local/sbin/vw-backup.sh，更新后请运行菜单 [22] 同步后台脚本。")
         print("完成一次手动备份或恢复后，请检查日志中是否出现 [性能] 和 [耗时] 行。")
         return 0
     if args.csv:
