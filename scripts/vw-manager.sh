@@ -726,11 +726,6 @@ configure_webdav() (
   ok "WebDAV 凭据已保存至 /etc/vaultwarden-webdav.json，权限为 600。"
   if [[ "${1:-}" != initial && -f "$CONFIG_FILE" ]]; then
     load_config || return 1
-    if [[ -n "$BACKUP_TARGET" && "$BACKUP_TARGET" != webdav ]]; then
-      err "WebDAV 配置已保存，但不修改当前定时目标 $BACKUP_TARGET。需要切换时请再次选择菜单 24。"
-      pause
-      return 0
-    fi
     local target
     target=$(read_default "定时备份目标（github / webdav）" "$BACKUP_TARGET")
     [[ "$target" == github || "$target" == webdav ]] || { err "目标无效。"; return 1; }
