@@ -4,6 +4,10 @@ umask 077
 CONFIG_FILE="${VW_CONFIG_FILE:-/etc/vaultwarden-backup.conf}"
 COMMON_LIB="${VW_COMMON_LIB:-/usr/local/libexec/vw-common.sh}"
 REPORT_DIR="${VW_DIAG_REPORT_DIR:-/var/log/vaultwarden-backup-diagnostics}"
+CONFIG_VALID=0
+[[ -f "$COMMON_LIB" ]] || { echo "找不到共享安全函数库：$COMMON_LIB" >&2; exit 1; }
+# shellcheck disable=SC1090
+source "$COMMON_LIB"
 mkdir -p "$REPORT_DIR"
 chmod 700 "$REPORT_DIR"
 STAMP=$(date '+%Y%m%d-%H%M%S')
@@ -23,8 +27,14 @@ for cmd in docker age age-keygen git ssh sqlite3 tar gzip sha256sum curl python3
 done
 echo
 if [[ -f "$CONFIG_FILE" ]]; then
-  # shellcheck disable=SC1090
-  source "$CONFIG_FILE"
+  if vw_require_secure_config "$CONFIG_FILE"; then
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE"
+    CONFIG_VALID=1
+  else
+    echo "Configuration: present but unsafe; values were not loaded."
+  fi
+  if (( CONFIG_VALID == 1 )); then
   echo "Configuration: present (secrets omitted)"
   printf 'Configured container: %s\n' "${CONTAINER:-<unset>}"
   printf 'Configured data path: %s\n' "${DATA_DIR:-<unset>}"
@@ -35,15 +45,14 @@ if [[ -f "$CONFIG_FILE" ]]; then
   printf 'Systemd frequency: %s\n' "${BACKUP_FREQUENCY:-daily}"
   printf 'Systemd schedule: %s\n' "${SYSTEMD_TIME:-*-*-* 05:20:00}"
   printf 'Notification method: %s\n' "${NOTIFY_METHOD:-none}"
+  fi
 else
   echo "Configuration: MISSING ($CONFIG_FILE)"
 fi
 if command -v docker >/dev/null 2>&1; then
   echo; echo "Docker containers:"
   docker ps -a --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
-  if [[ -f "$CONFIG_FILE" && -f "$COMMON_LIB" ]]; then
-    # shellcheck disable=SC1090
-    source "$COMMON_LIB"
+  if (( CONFIG_VALID == 1 )); then
     echo; echo "Vaultwarden target discovery:"
     if vw_find_target "${CONTAINER:-}" "${DATA_DIR:-}" true; then
       printf 'Container: %s\nImage: %s\nHealth: %s\nData directory: %s\n' "$VW_DETECTED_CONTAINER" "$VW_DETECTED_IMAGE" "$VW_DETECTED_HEALTH" "$VW_DETECTED_DATA_DIR"

@@ -3,8 +3,9 @@
 # This script does NOT install Docker, Vaultwarden, HTTPS, or reverse proxy.
 set -Eeuo pipefail
 umask 077
+unset VW_CONFIG_FILE VW_LOG_FILE VW_LOCK_FILE VW_STATE_DIR VW_COMMON_LIB VW_MANIFEST_TOOL VW_ARCHIVE_CHECK_TOOL VW_MIN_FREE_MB VW_PERF_FILE VW_PERF_LOCK_FILE VW_DIAG_REPORT_DIR
 
-VERSION="1.4.4"
+VERSION="1.4.5"
 CONFIG_FILE="/etc/vaultwarden-backup.conf"
 BACKUP_SCRIPT="/usr/local/sbin/vw-backup.sh"
 RESTORE_SCRIPT="/usr/local/sbin/vw-restore-prepare.sh"
@@ -32,7 +33,9 @@ pause() { read -r -p $'\n按 Enter 返回菜单... ' _ || true; }
 confirm_yes() {
   local prompt="$1" answer
   printf '\n%s\n' "$prompt"
+  vw_perf_user_wait_begin
   read -r -p "输入 yes 继续（其他输入均取消）: " answer || true
+  vw_perf_user_wait_end
   [[ "${answer,,}" == "yes" ]]
 }
 confirm_yes_upper() {
@@ -40,12 +43,16 @@ confirm_yes_upper() {
   # any letter case. This is case-insensitive, not a single-key confirmation.
   local prompt="$1" answer
   printf '\n%s\n' "$prompt"
+  vw_perf_user_wait_begin
   read -r -p "这是有风险的操作。输入 yes 确认（大小写不敏感，例如 yes / YES / Yes）: " answer || true
+  vw_perf_user_wait_end
   [[ "${answer,,}" == "yes" ]]
 }
 read_default() {
   local prompt="$1" default="$2" value
+  vw_perf_user_wait_begin
   read -r -p "$prompt [$default]: " value || true
+  vw_perf_user_wait_end
   printf '%s' "${value:-$default}"
 }
 
@@ -124,7 +131,9 @@ list_vaultwarden_containers() {
     choice=1
     info "只发现一个候选容器，默认选择它。"
   else
+    vw_perf_user_wait_begin
     read -r -p "请输入要管理的容器编号: " choice
+    vw_perf_user_wait_end
     [[ "$choice" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= ${#matches[@]})) || { err "编号无效。"; return 1; }
   fi
   IFS='|' read -r DETECTED_CONTAINER DETECTED_IMAGE DETECTED_STATUS <<< "${matches[$((choice-1))]}"
@@ -170,11 +179,7 @@ load_config() {
     err "尚未配置。请先选择菜单 1「首次配置 / 重新检测」。"
     return 1
   fi
-  # Config is created by this root-only manager and must not be writable by other users.
-  if [[ "$(stat -c '%a' "$CONFIG_FILE" 2>/dev/null || echo 777)" != "600" ]]; then
-    warn "$CONFIG_FILE 权限不是 600，正在收紧权限。"
-    chmod 600 "$CONFIG_FILE"
-  fi
+  vw_require_secure_config "$CONFIG_FILE" || return 1
   # shellcheck disable=SC1090
   source "$CONFIG_FILE"
   # Backward-compatible defaults for configurations created by v1.2.x.
@@ -333,14 +338,15 @@ write_config() {
 
 install_helper_scripts() {
   local source_dir="$SCRIPT_DIR"
-  [[ -f "$source_dir/vw-manager.sh" && -f "$source_dir/vw-common.sh" && -f "$source_dir/vw-backup.sh" && -f "$source_dir/vw-restore-prepare.sh" && -f "$source_dir/vw-manifest.py" && -f "$source_dir/vw-diagnose.sh" && -f "$source_dir/vw-performance.py" && -f "$source_dir/vbm-launcher.sh" ]] || {
-    err "项目脚本不完整，缺少 vw-common.sh / vw-backup.sh / vw-restore-prepare.sh。"
+  [[ -f "$source_dir/vw-manager.sh" && -f "$source_dir/vw-common.sh" && -f "$source_dir/vw-backup.sh" && -f "$source_dir/vw-restore-prepare.sh" && -f "$source_dir/vw-archive-check.py" && -f "$source_dir/vw-manifest.py" && -f "$source_dir/vw-diagnose.sh" && -f "$source_dir/vw-performance.py" && -f "$source_dir/vbm-launcher.sh" ]] || {
+    err "项目脚本不完整，缺少公共库、备份/恢复或归档检查工具。"
     return 1
   }
   install -d -o root -g root -m 755 /usr/local/libexec /usr/local/sbin
   install -o root -g root -m 644 "$source_dir/vw-common.sh" /usr/local/libexec/vw-common.sh || return 1
   install -o root -g root -m 700 "$source_dir/vw-backup.sh" "$BACKUP_SCRIPT" || return 1
   install -o root -g root -m 700 "$source_dir/vw-restore-prepare.sh" "$RESTORE_SCRIPT" || return 1
+  install -o root -g root -m 755 "$source_dir/vw-archive-check.py" /usr/local/libexec/vw-archive-check.py || return 1
   install -o root -g root -m 755 "$source_dir/vw-manifest.py" /usr/local/libexec/vw-manifest.py || return 1
   install -o root -g root -m 700 "$source_dir/vw-diagnose.sh" /usr/local/sbin/vw-diagnose.sh || return 1
   install -o root -g root -m 755 "$source_dir/vw-performance.py" /usr/local/libexec/vw-performance.py || return 1
@@ -370,6 +376,7 @@ PYVBM
   ok "后台脚本已安装/更新："
   echo "  /usr/local/libexec/vw-common.sh"
   echo "  /usr/local/libexec/vw-manifest.py"
+  echo "  /usr/local/libexec/vw-archive-check.py"
   echo "  $BACKUP_SCRIPT"
   echo "  $RESTORE_SCRIPT"
   echo "  /usr/local/sbin/vw-diagnose.sh"
@@ -543,7 +550,13 @@ run_backup_now() {
   if ! confirm_yes_upper "此操作会使 Vaultwarden 短暂不可用。确认立即备份？"; then warn "已取消。"; return 0; fi
   local rc=0
   if VW_COMMON_LIB="$common_lib" VW_MANIFEST_TOOL="$manifest_tool" VW_PERF_FILE="/var/lib/vaultwarden-backup/performance.tsv" bash "$worker"; then rc=0; else rc=$?; fi
-  if ((rc == 0)); then ok "备份脚本执行完成。"; else err "备份执行失败，先查看日志：$LOG_FILE"; fi
+  if ((rc == 0)); then
+    ok "备份脚本执行完成。"
+  elif ((rc == 75)); then
+    warn "备份因另一个操作占用锁而跳过；请等待当前操作结束后重试。"
+  else
+    err "备份执行失败，先查看日志：$LOG_FILE"
+  fi
   pause
   return "$rc"
 }
@@ -561,7 +574,7 @@ restore_from_github() (
   local temp_root="" staging="" container="" stopped_by_script=0 data_change_started=0
   cleanup_restore() {
     local restore_rc=$?
-    if [[ "${stopped_by_script:-0}" == "1" && -n "${container:-}" ]]; then
+    if [[ "${stopped_by_script:-0}" == "1" && "${was_running:-0}" == "1" && -n "${container:-}" ]]; then
       if [[ "${data_change_started:-0}" == "1" ]]; then
         echo "严重提醒：恢复过程中断，数据目录可能处于恢复中间状态。为避免使用不完整数据，容器保持停止。" >&2
         echo "使用原 age 私钥和回滚文件完成恢复前，不要在 1Panel 中启动该容器。" >&2
@@ -573,17 +586,22 @@ restore_from_github() (
           vw_perf_stage_begin "cleanup_health_check_wait"
           if vw_wait_healthy "$container" 120 2 2; then
             vw_perf_stage_end aggregate
+            SERVICE_RESTORED=true
+            vw_perf_downtime_end aggregate
             echo "安全清理：Vaultwarden 已重新启动并通过主动健康探测：$container"
           else
             vw_perf_stage_end aggregate
+            vw_perf_downtime_end aggregate
             echo "严重提醒：容器已启动，但未通过健康探测。请进入 1Panel 检查：$container" >&2
           fi
         else
           vw_perf_stage_end failed
+          vw_perf_downtime_end aggregate
           echo "严重提醒：自动清理时无法启动 Vaultwarden。请进入 1Panel 手动启动：$container" >&2
         fi
       fi
     fi
+    vw_perf_downtime_end aggregate
     [[ -n "${staging:-}" ]] && rm -rf -- "$staging"
     [[ -n "${temp_root:-}" ]] && rm -rf -- "$temp_root"
     if [[ "${VW_PERF_STARTED:-0}" == 1 && "${VW_PERF_FINISHED:-0}" != 1 ]]; then
@@ -608,8 +626,10 @@ restore_from_github() (
   temp_root=$(mktemp -d /var/tmp/vw-github-restore.XXXXXX)
   chmod 700 "$temp_root"
   repo_tmp="$temp_root/repository"
-  timestamp=$(date '%Y%m%d-%H%M%S')
-  vw_perf_init restore "$timestamp-$$"
+  vw_require_free_space "$temp_root" "$((MIN_FREE_MB * 1024 * 1024))" "恢复下载临时目录" || { err "临时目录剩余空间不足，恢复已停止。"; rm -rf -- "$temp_root"; return 1; }
+  timestamp=$(date '+%Y%m%d-%H%M%S')
+  local run_id="${timestamp}-$$"
+  vw_perf_init restore "$run_id"
   vw_perf_stage_begin "github_clone_and_list"
 
   echo "========== 第 1 步：从 GitHub 获取备份列表 =========="
@@ -621,6 +641,7 @@ restore_from_github() (
     rm -rf -- "$temp_root"
     return 1
   fi
+  vw_require_free_space "$temp_root" "$((MIN_FREE_MB * 1024 * 1024))" "恢复下载临时目录" || { err "临时目录剩余空间不足，恢复已停止。"; rm -rf -- "$temp_root"; return 1; }
   vw_perf_stage_end success
 
   local -a archives=()
@@ -629,7 +650,9 @@ restore_from_github() (
   echo "可恢复的备份（按时间从新到旧）："
   local i
   for i in "${!archives[@]}"; do printf '  %d) %s (%s)\n' "$((i+1))" "${archives[$i]}" "$(du -h "$repo_tmp/${archives[$i]}" | awk '{print $1}')"; done
+  vw_perf_user_wait_begin
   read -r -p "请输入要恢复的备份编号: " choice
+  vw_perf_user_wait_end
   if [[ ! "$choice" =~ ^[0-9]+$ ]] || ((choice < 1 || choice > ${#archives[@]})); then
     err "编号无效。"; rm -rf -- "$temp_root"; return 1
   fi
@@ -650,11 +673,11 @@ restore_from_github() (
 
   echo
   echo "========== 第 3 步：校验、解密并暂存 =========="
-  timestamp=$(date '+%Y%m%d-%H%M%S')
+  timestamp="$(date '+%Y%m%d-%H%M%S')-$$"
   staging="/var/lib/vaultwarden-restore-staging-$timestamp"
   if [[ -e "$staging" ]]; then err "暂存目录已存在：$staging"; rm -rf -- "$temp_root"; return 1; fi
   vw_perf_stage_begin "restore_decrypt_validate"
-  if ! bash "$RESTORE_SCRIPT" "$archive" "$identity" "$staging"; then
+  if ! VW_MIN_FREE_MB="${MIN_FREE_MB:-512}" bash "$RESTORE_SCRIPT" "$archive" "$identity" "$staging"; then
     err "校验或解密失败。原 Vaultwarden 数据尚未修改。"
     rm -rf -- "$staging" "$temp_root"
     return 1
@@ -674,9 +697,28 @@ restore_from_github() (
     rm -rf -- "$staging" "$temp_root"
     return 1
   fi
-  timestamp=$(date '+%Y%m%d-%H%M%S')
+  [[ "${MIN_FREE_MB:-}" =~ ^[0-9]+$ ]] || { err "恢复空间阈值配置无效。"; rm -rf -- "$staging" "$temp_root"; return 1; }
+  CURRENT_DATA_BYTES=$(du -sb "$data_dir" | awk '{print $1}') || { err "无法读取当前数据目录大小。"; rm -rf -- "$staging" "$temp_root"; return 1; }
+  RESTORE_DATA_BYTES=$(du -sb "$staging/data" | awk '{print $1}') || { err "无法读取恢复暂存目录大小。"; rm -rf -- "$staging" "$temp_root"; return 1; }
+  [[ "$CURRENT_DATA_BYTES" =~ ^[0-9]+$ && "$RESTORE_DATA_BYTES" =~ ^[0-9]+$ ]] || { err "无法确定当前或恢复数据大小。"; rm -rf -- "$staging" "$temp_root"; return 1; }
+  MIN_FREE_BYTES=$((MIN_FREE_MB * 1024 * 1024))
+  RESTORE_TARGET_REQUIRED=$(( RESTORE_DATA_BYTES > CURRENT_DATA_BYTES ? RESTORE_DATA_BYTES - CURRENT_DATA_BYTES : 0 ))
+  RESTORE_TARGET_REQUIRED=$((RESTORE_TARGET_REQUIRED + MIN_FREE_BYTES))
+  vw_require_free_space "$data_dir" "$RESTORE_TARGET_REQUIRED" "Vaultwarden 数据分区" || {
+    err "生产数据分区空间不足，原数据保持不变。"
+    rm -rf -- "$staging" "$temp_root"
+    return 1
+  }
+  ROLLBACK_REQUIRED=$((CURRENT_DATA_BYTES + CURRENT_DATA_BYTES / 5))
+  if (( ROLLBACK_REQUIRED < MIN_FREE_BYTES )); then ROLLBACK_REQUIRED="$MIN_FREE_BYTES"; fi
+  timestamp="$(date '+%Y%m%d-%H%M%S')-$$"
   mkdir -p "$BACKUP_DIR"
   chmod 700 "$BACKUP_DIR"
+  vw_require_free_space "$BACKUP_DIR" "$ROLLBACK_REQUIRED" "恢复前回滚快照目录" || {
+    err "恢复前回滚快照目录空间不足，原数据保持不变。"
+    rm -rf -- "$staging" "$temp_root"
+    return 1
+  }
   rollback_archive="$BACKUP_DIR/pre-restore-${timestamp}.tar.gz.age"
   if [[ -e "$rollback_archive" ]]; then err "恢复前快照文件已存在：$rollback_archive"; return 1; fi
   vw_perf_stage_end success
@@ -693,13 +735,23 @@ restore_from_github() (
   local was_running=0 rollback_ok=0
   [[ "$container_state" == "running" ]] && was_running=1
   vw_perf_stage_begin "restore_container_stop"
-  if ((was_running == 1)); then
-    info "正在停止 Vaultwarden 容器：$container"
-    if ! docker stop --time 30 "$container" >/dev/null; then
-      err "容器停止失败，未修改数据目录。"
-      return 1
-    fi
+  if (( was_running == 1 )); then vw_perf_downtime_begin; fi
+  info "正在确认目标容器身份并停止服务：$container"
+  local stop_rc=0
+  if vw_ensure_target_stopped "$container" "$data_dir" 30; then stop_rc=0; else stop_rc=$?; fi
+  if [[ "${VW_CONTAINER_STOPPED_BY_HELPER:-0}" == 1 ]]; then
     stopped_by_script=1
+    was_running=1
+  fi
+  if (( stop_rc != 0 )); then
+    err "无法唯一确认目标容器已停止，未修改生产数据。"
+    return 1
+  fi
+  container="$VW_DETECTED_CONTAINER"
+  data_dir="$VW_DETECTED_DATA_DIR"
+  if [[ "${VW_CONTAINER_STOPPED_BY_HELPER:-0}" == 1 ]]; then
+    stopped_by_script=1
+    was_running=1
     vw_perf_stage_end success
   else
     vw_perf_stage_end skipped
@@ -746,6 +798,17 @@ restore_from_github() (
     [[ -f "$data_dir/db.sqlite3" ]]
   }
 
+  echo "正在再次确认容器已停止且 /data 身份未变化..."
+  stop_rc=0
+  if vw_ensure_target_stopped "$container" "$data_dir" 30; then stop_rc=0; else stop_rc=$?; fi
+  if [[ "${VW_CONTAINER_STOPPED_BY_HELPER:-0}" == 1 ]]; then stopped_by_script=1; fi
+  if (( stop_rc != 0 )); then
+    err "覆盖前无法确认目标容器已停止；保留解密暂存与加密回滚快照。"
+    return 1
+  fi
+  container="$VW_DETECTED_CONTAINER"
+  data_dir="$VW_DETECTED_DATA_DIR"
+  if [[ "${VW_CONTAINER_STOPPED_BY_HELPER:-0}" == 1 ]]; then stopped_by_script=1; fi
   echo "正在替换 /data 目录内容..."
   data_change_started=1
   if ! find "$data_dir" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; then
@@ -802,6 +865,7 @@ restore_from_github() (
       vw_perf_stage_begin "restore_health_check_wait"
       if vw_wait_healthy "$container" 120 2 2; then
         vw_perf_stage_end aggregate
+        vw_perf_downtime_end aggregate
         ok "恢复后的 Vaultwarden 已通过连续主动健康探测。"
       else
         vw_perf_stage_end aggregate
@@ -810,22 +874,22 @@ restore_from_github() (
       fi
     fi
     if [[ "$start_choice" == "start_failed" || "$start_choice" == "health_failed" ]]; then
-      current_state=$(docker inspect -f '{{.State.Status}}' "$container" 2>/dev/null || echo unknown)
       vw_perf_stage_begin "restore_rollback_container_stop"
-      if [[ "$current_state" == "running" ]]; then
-        if docker stop --time 20 "$container" >/dev/null 2>&1; then
-          stopped_by_script=1
-          vw_perf_stage_end success
-        else
-          vw_perf_stage_end failed
-          err "无法停止恢复后的容器；为避免在线修改正在使用的数据库，自动回滚已中止。请先在 1Panel 停止容器，再手动重试恢复。"
-          data_change_started=0
-          rm -rf -- "$staging" "$temp_root"
-          return 1
-        fi
-      else
-        vw_perf_stage_end skipped
+      stop_rc=0
+      if vw_ensure_target_stopped "$container" "$data_dir" 20; then stop_rc=0; else stop_rc=$?; fi
+      if (( stop_rc != 0 )); then
+        vw_perf_stage_end failed
+        err "无法唯一确认目标容器已停止；为避免在线修改数据，自动回滚已中止。回滚快照保留在：$rollback_archive"
+        data_change_started=0
+        stopped_by_script=0
+        rm -rf -- "$staging" "$temp_root"
+        return 1
       fi
+      container="$VW_DETECTED_CONTAINER"
+      data_dir="$VW_DETECTED_DATA_DIR"
+      [[ "${VW_CONTAINER_STOPPED_BY_HELPER:-0}" == 1 ]] && stopped_by_script=1
+      vw_perf_stage_end success
+      data_change_started=1
       vw_perf_stage_begin "restore_rollback_previous_data"
       if rollback_from_snapshot; then
         vw_perf_stage_end success
@@ -837,9 +901,12 @@ restore_from_github() (
           vw_perf_stage_begin "restore_rollback_health_wait"
           if vw_wait_healthy "$container" 120 2 2; then
             vw_perf_stage_end aggregate
+            SERVICE_RESTORED=true
+            vw_perf_downtime_end aggregate
             warn "已自动回滚到恢复前数据并成功启动。原回滚文件仍保留：$rollback_archive"
           else
             vw_perf_stage_end aggregate
+            vw_perf_downtime_end aggregate
             data_change_started=0
             vw_perf_stage_begin "restore_rollback_unhealthy_container_stop"
             if docker stop --time 20 "$container" >/dev/null 2>&1; then
@@ -878,6 +945,7 @@ restore_from_github() (
   fi
   warn "请登录网页测试原用户、附件、TOTP 与同步。确认一切正常之前，不要删除原数据加密回滚快照：$rollback_archive"
   ok "恢复暂存目录将在退出菜单时自动清理。"
+  vw_perf_finish success
   pause
 )
 
@@ -892,9 +960,7 @@ verify_github_backup() (
   require_root
   load_config || return 1
   [[ -x "$RESTORE_SCRIPT" ]] || { err "恢复准备脚本尚未安装，请先运行菜单 1 或菜单 7 更新脚本。"; return 1; }
-  if ! command -v sqlite3 >/dev/null 2>&1; then
-    warn "当前未安装 sqlite3；可选的数据库 quick_check 将跳过，但仍会检查 SHA256、age 解密和 tar 内容。"
-  fi
+  command -v sqlite3 >/dev/null 2>&1 || { err "恢复验证需要 sqlite3 执行数据库完整性检查。请先安装依赖。"; return 1; }
   temp_root=$(mktemp -d /var/tmp/vw-verify.XXXXXX)
   chmod 700 "$temp_root"
   repo_tmp="$temp_root/repository"
@@ -926,7 +992,7 @@ verify_github_backup() (
   echo
   echo "第 3 项：实际解密、读取归档目录"
   staging="$temp_root/staging"
-  bash "$RESTORE_SCRIPT" "$archive" "$identity" "$staging" || { err "解密或归档检查失败。"; return 1; }
+  VW_MIN_FREE_MB="${MIN_FREE_MB:-512}" bash "$RESTORE_SCRIPT" "$archive" "$identity" "$staging" || { err "解密或归档检查失败。"; return 1; }
   echo
   echo "第 4 项：检查关键数据文件"
   [[ -s "$staging/data/db.sqlite3" ]] || { err "数据库缺失或为空。"; return 1; }
@@ -997,7 +1063,7 @@ restore_rehearsal() (
   pub=$(age-keygen -y "$identity") || { err "无法读取 age 私钥。"; return 1; }
   [[ "$pub" == "$AGE_RECIPIENT" ]] || { err "此私钥与配置中的 AGE_RECIPIENT 不匹配。"; return 1; }
   staging="$temp_root/staging"
-  bash "$RESTORE_SCRIPT" "$archive" "$identity" "$staging" || { err "备份解密或 SQLite 检查失败。"; return 1; }
+  VW_MIN_FREE_MB="${MIN_FREE_MB:-512}" bash "$RESTORE_SCRIPT" "$archive" "$identity" "$staging" || { err "备份解密或 SQLite 检查失败。"; return 1; }
   test_name="vw-restore-drill-$(date +%Y%m%d%H%M%S)-$$"
   echo
   echo "========== 隔离恢复演练计划 =========="
@@ -1158,8 +1224,12 @@ configure_notifications() {
   vw_save_config || { err "保存通知配置失败。"; return 1; }
   ok "通知配置已保存到权限为 600 的配置文件。"
   if [[ "$NOTIFY_METHOD" != none ]]; then
-    vw_notify success "Vaultwarden Backup Manager notification test from $(hostname)."
-    info "已发送测试通知；请检查你的 Telegram、ntfy 或 Webhook 接收端。"
+    if vw_notify success "Vaultwarden Backup Manager notification test from $(hostname)." true; then
+      ok "测试通知已被服务端接受。"
+    else
+      err "测试通知发送失败；请检查接收 ID、凭据、URL 和网络。"
+      return 1
+    fi
   fi
   pause
 }
@@ -1168,11 +1238,28 @@ preupgrade_backup() {
   load_config || return 1
   echo "升级前保护：先运行一次完整备份。只有备份脚本返回成功且远端提交校验通过，才建议继续在 1Panel 更新 Vaultwarden。"
   confirm_yes_upper "确认现在创建升级前备份？" || return 0
-  if bash "$BACKUP_SCRIPT"; then
+  local worker="$BACKUP_SCRIPT" common_lib="$COMMON_LIB" manifest_tool="/usr/local/libexec/vw-manifest.py" run_id result_file rc=0
+  [[ -f "$SCRIPT_DIR/vw-backup.sh" ]] && worker="$SCRIPT_DIR/vw-backup.sh"
+  [[ -f "$SCRIPT_DIR/vw-common.sh" ]] && common_lib="$SCRIPT_DIR/vw-common.sh"
+  [[ -f "$SCRIPT_DIR/vw-manifest.py" ]] && manifest_tool="$SCRIPT_DIR/vw-manifest.py"
+  run_id="$(date '+%Y%m%d-%H%M%S')-$$"
+  result_file="/var/lib/vaultwarden-backup/runs/$run_id.env"
+  echo "本次备份运行 ID：$run_id"
+  if VW_RUN_ID="$run_id" VW_COMMON_LIB="$common_lib" VW_MANIFEST_TOOL="$manifest_tool" bash "$worker"; then rc=0; else rc=$?; fi
+  if (( rc == 0 )) && [[ -f "$result_file" ]] \
+    && grep -Fxq 'STATUS=success' "$result_file" \
+    && grep -Fxq "RUN_ID=$run_id" "$result_file" \
+    && grep -Fxq 'LOCAL_VERIFIED=true' "$result_file" \
+    && grep -Fxq 'SERVICE_RESTORED=true' "$result_file" \
+    && grep -Fxq 'REMOTE_VERIFIED=true' "$result_file"; then
     ok "升级前备份成功。现在可以进入 1Panel → 已安装应用 → Vaultwarden 执行更新。"
     warn "本工具不会自动升级 Vaultwarden；升级后可再次运行菜单 4 检查新容器名称，并观察下一次备份。"
   else
-    err "升级前备份失败。请勿继续更新 Vaultwarden，先查看日志并修复问题。"
+    if [[ -f "$result_file" ]] && grep -Fxq 'STATUS=skipped' "$result_file"; then
+      err "本次升级前备份因另一个操作占用锁而跳过；不会允许继续升级。"
+    else
+      err "本次升级前备份未能完成本地验证、服务恢复和 GitHub 远端核验。请勿继续更新 Vaultwarden。"
+    fi
     return 1
   fi
   pause
@@ -1343,7 +1430,7 @@ performance_monitor() {
   [[ -f "$tool" ]] || { err "找不到性能分析工具，请从项目目录运行菜单 07 更新脚本。"; pause; return 1; }
   if [[ ! -f "$perf_file" ]]; then
     warn "尚未找到性能记录文件：$perf_file"
-    echo "v1.4.4 已增加 Vaultwarden /healthcheck.sh 主动探测计时，默认每 2 秒检查并要求连续 2 次成功。"
+    echo "v1.4.5 已记录主动健康探测、人工输入等待和服务停机窗口。"
     echo "systemd 自动备份使用系统安装版 worker；更新项目后请先执行菜单 07 同步后台脚本。"
     echo "完成一次成功或失败的手动备份/恢复后，再返回此处查看性能记录。"
     pause

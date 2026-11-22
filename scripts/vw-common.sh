@@ -6,6 +6,57 @@ vw_error() { printf '[错误] %s\n' "$*" >&2; }
 vw_info()  { printf '[信息] %s\n' "$*"; }
 vw_ok()    { printf '[完成] %s\n' "$*"; }
 
+vw_require_secure_config() {
+  local file="${1:-${CONFIG_FILE:-}}" owner mode directory directory_owner directory_mode
+  [[ -n "$file" && -f "$file" && ! -L "$file" ]] || { vw_error "配置文件不存在或是符号链接：${file:-<empty>}"; return 1; }
+  owner=$(stat -c '%u' -- "$file") || return 1
+  [[ "$owner" == 0 ]] || { vw_error "配置文件必须由 root 所有：$file"; return 1; }
+  directory=$(dirname -- "$file")
+  directory_owner=$(stat -c '%u' -- "$directory") || return 1
+  directory_mode=$(stat -c '%a' -- "$directory") || return 1
+  [[ "$directory_owner" == 0 ]] && (( (8#$directory_mode & 022) == 0 )) || {
+    vw_error "配置目录必须由 root 所有且不可被组/其他用户写入：$directory"
+    return 1
+  }
+  mode=$(stat -c '%a' -- "$file") || return 1
+  if [[ "$mode" != 600 ]]; then
+    chmod 600 -- "$file" || { vw_error "无法收紧配置文件权限：$file"; return 1; }
+  fi
+  [[ "$(stat -c '%a' -- "$file")" == 600 ]]
+}
+
+vw_atomic_replace() {
+  local source="$1" target="$2"
+  python3 - "$source" "$target" <<'PY'
+import os
+import sys
+
+source, target = sys.argv[1:]
+with open(source, "rb") as handle:
+    os.fsync(handle.fileno())
+os.replace(source, target)
+directory = os.path.dirname(target) or "."
+flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+descriptor = os.open(directory, flags)
+try:
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+PY
+}
+
+vw_require_free_space() {
+  local path="$1" required_bytes="$2" label="$3" available_bytes
+  [[ -d "$path" ]] || { vw_error "空间检查目录不存在：$path"; return 1; }
+  [[ "$required_bytes" =~ ^[0-9]+$ ]] || { vw_error "空间检查阈值无效：$required_bytes"; return 1; }
+  available_bytes=$(df -PB1 -- "$path" | awk 'NR == 2 {print $4}') || return 1
+  [[ "$available_bytes" =~ ^[0-9]+$ ]] || { vw_error "无法读取文件系统剩余空间：$path"; return 1; }
+  if (( available_bytes < required_bytes )); then
+    vw_error "$label 空间不足：需要至少 $(vw_format_bytes "$required_bytes")，当前剩余 $(vw_format_bytes "$available_bytes")（$path）"
+    return 1
+  fi
+}
+
 # Exports: VW_DETECTED_CONTAINER, VW_DETECTED_IMAGE, VW_DETECTED_STATUS,
 # VW_DETECTED_DATA_DIR, VW_DETECTED_HEALTH.
 vw_find_target() {
@@ -62,15 +113,134 @@ vw_find_target() {
 }
 
 vw_save_config() {
-  local tmp var
+  local tmp var directory directory_owner directory_mode rc
   [[ -n "${CONFIG_FILE:-}" ]] || return 1
+  directory=$(dirname -- "$CONFIG_FILE")
+  directory_owner=$(stat -c '%u' -- "$directory") || return 1
+  directory_mode=$(stat -c '%a' -- "$directory") || return 1
+  [[ "$directory_owner" == 0 ]] && (( (8#$directory_mode & 022) == 0 )) || return 1
+  [[ ! -L "$CONFIG_FILE" ]] || return 1
   tmp=$(mktemp "${CONFIG_FILE}.XXXXXX") || return 1
   {
     for var in CONTAINER DATA_DIR AGE_RECIPIENT GITHUB_REPO GITHUB_BRANCH GITHUB_SSH_KEY BACKUP_DIR REPO_DIR RETENTION_DAYS MAX_FILE_MIB AGE_IDENTITY_DEFAULT SYSTEMD_TIME BACKUP_FREQUENCY MIN_FREE_MB GIT_PUSH_RETRIES GIT_RETRY_DELAY NOTIFY_METHOD TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID NTFY_URL NTFY_TOKEN WEBHOOK_URL NOTIFY_ON_SUCCESS NOTIFY_ON_FAILURE; do
       printf '%s=%q\n' "$var" "${!var-}"
     done
   } > "$tmp"
-  chmod 600 "$tmp"; chown root:root "$tmp" 2>/dev/null || true; mv -f -- "$tmp" "$CONFIG_FILE"
+  chmod 600 -- "$tmp" || { rc=$?; rm -f -- "$tmp"; return "$rc"; }
+  chown root:root -- "$tmp" || { rc=$?; rm -f -- "$tmp"; return "$rc"; }
+  vw_atomic_replace "$tmp" "$CONFIG_FILE" || { rc=$?; rm -f -- "$tmp"; return "$rc"; }
+  rm -f -- "$tmp"
+  return 0
+}
+
+vw_find_container_by_data_dir() {
+  local expected_data_dir="$1" expected_canonical id name source canonical status image health
+  local -a ids=() matched_names=() matched_images=() matched_statuses=() matched_healths=()
+  [[ -d "$expected_data_dir" ]] || { vw_error "Vaultwarden 数据目录不存在：$expected_data_dir"; return 1; }
+  expected_canonical=$(readlink -f -- "$expected_data_dir") || return 1
+  mapfile -t ids < <(docker ps -aq)
+  for id in "${ids[@]}"; do
+    name=$(docker inspect -f '{{.Name}}' "$id" 2>/dev/null | sed 's#^/##') || continue
+    source=$(docker inspect "$id" --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{"\n"}}{{end}}{{end}}' 2>/dev/null | sed '/^[[:space:]]*$/d') || continue
+    [[ -n "$source" && "$source" != *$'\n'* ]] || continue
+    canonical=$(readlink -f -- "$source" 2>/dev/null) || continue
+    [[ "$canonical" == "$expected_canonical" ]] || continue
+    image=$(docker inspect -f '{{.Config.Image}}' "$id" 2>/dev/null) || continue
+    status=$(docker inspect -f '{{.State.Status}}' "$id" 2>/dev/null) || continue
+    health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' "$id" 2>/dev/null || echo unknown)
+    matched_names+=("$name"); matched_images+=("$image"); matched_statuses+=("$status"); matched_healths+=("$health")
+  done
+  if ((${#matched_names[@]} != 1)); then
+    vw_error "数据目录 $expected_canonical 对应 ${#matched_names[@]} 个容器；无法安全唯一确认。"
+    return 1
+  fi
+  VW_DETECTED_CONTAINER="${matched_names[0]}"
+  VW_DETECTED_IMAGE="${matched_images[0]}"
+  VW_DETECTED_STATUS="${matched_statuses[0]}"
+  VW_DETECTED_DATA_DIR="$expected_canonical"
+  VW_DETECTED_HEALTH="${matched_healths[0]}"
+  export VW_DETECTED_CONTAINER VW_DETECTED_IMAGE VW_DETECTED_STATUS VW_DETECTED_DATA_DIR VW_DETECTED_HEALTH
+}
+
+vw_ensure_target_stopped() {
+  local preferred_container="$1" expected_data_dir="$2" timeout_s="${3:-30}" status
+  VW_CONTAINER_STOPPED_BY_HELPER=0
+  vw_find_container_by_data_dir "$expected_data_dir" || return 1
+  [[ "$VW_DETECTED_DATA_DIR" == "$(readlink -f -- "$expected_data_dir")" ]] || {
+    vw_error "Vaultwarden 数据目录身份已变化，拒绝操作：$expected_data_dir"
+    return 1
+  }
+  if [[ -n "$preferred_container" && "$preferred_container" != "$VW_DETECTED_CONTAINER" ]]; then
+    vw_info "容器名称已变化；已按 /data 路径确认新容器：$preferred_container -> $VW_DETECTED_CONTAINER"
+  fi
+  preferred_container="$VW_DETECTED_CONTAINER"
+  status=$(docker inspect -f '{{.State.Status}}' "$preferred_container" 2>/dev/null) || {
+    vw_error "无法确认容器状态：$preferred_container"
+    return 1
+  }
+  case "$status" in
+    running|restarting|paused)
+      if [[ "$status" == paused ]] && ! docker unpause "$preferred_container" >/dev/null; then
+        vw_error "无法解除容器暂停状态：$preferred_container"
+        return 1
+      fi
+      if ! docker stop --time "$timeout_s" "$preferred_container" >/dev/null; then
+        vw_error "无法停止容器：$preferred_container"
+        return 1
+      fi
+      VW_CONTAINER_STOPPED_BY_HELPER=1
+      ;;
+    created|exited|dead) ;;
+    *)
+      vw_error "容器状态不明确（$status），拒绝修改数据：$preferred_container"
+      return 1
+      ;;
+  esac
+  status=$(docker inspect -f '{{.State.Status}}' "$preferred_container" 2>/dev/null) || {
+    vw_error "停止后无法重新确认容器状态：$preferred_container"
+    return 1
+  }
+  case "$status" in
+    created|exited|dead) ;;
+    *)
+      vw_error "容器停止后状态仍不安全（$status）：$preferred_container"
+      return 1
+      ;;
+  esac
+  VW_DETECTED_CONTAINER="$preferred_container"
+  VW_DETECTED_STATUS="$status"
+  export VW_CONTAINER_STOPPED_BY_HELPER VW_DETECTED_CONTAINER
+  export VW_DETECTED_STATUS
+}
+
+vw_perf_downtime_begin() {
+  [[ "${VW_PERF_STARTED:-0}" == 1 && -z "${VW_PERF_DOWNTIME_START_MS:-}" ]] || return 0
+  VW_PERF_DOWNTIME_START_MS=$(vw_perf_now_ms)
+}
+
+vw_perf_downtime_end() {
+  local now elapsed
+  [[ -n "${VW_PERF_DOWNTIME_START_MS:-}" ]] || return 0
+  now=$(vw_perf_now_ms)
+  elapsed=$((now - VW_PERF_DOWNTIME_START_MS))
+  (( elapsed < 0 )) && elapsed=0
+  vw_perf_record_event SERVICE_DOWNTIME "$elapsed" aggregate 0
+  VW_PERF_DOWNTIME_START_MS=""
+}
+
+vw_perf_user_wait_begin() {
+  [[ "${VW_PERF_STARTED:-0}" == 1 && "${VW_PERF_FINISHED:-0}" != 1 ]] || return 0
+  VW_PERF_USER_WAIT_START_MS=$(vw_perf_now_ms)
+}
+
+vw_perf_user_wait_end() {
+  local now elapsed
+  [[ -n "${VW_PERF_USER_WAIT_START_MS:-}" ]] || return 0
+  now=$(vw_perf_now_ms)
+  elapsed=$((now - VW_PERF_USER_WAIT_START_MS))
+  (( elapsed < 0 )) && elapsed=0
+  vw_perf_record_event USER_WAIT "$elapsed" informational 0
+  VW_PERF_USER_WAIT_START_MS=""
 }
 
 
@@ -180,18 +350,22 @@ vw_format_bytes() {
 }
 
 vw_notify() {
-  local event="${1:-info}" message="${2:-Vaultwarden backup event}" config="${CONFIG_FILE:-/etc/vaultwarden-backup.conf}"
+  local event="${1:-info}" message="${2:-Vaultwarden backup event}" force="${3:-false}" config="${CONFIG_FILE:-/etc/vaultwarden-backup.conf}"
   [[ -f "$config" ]] || return 0
-  # Notification errors must never change backup/restore exit status.
-  python3 - "$config" "$event" "$message" <<'PY' || true
+  vw_require_secure_config "$config" || return 1
+  # Backup/restore callers deliberately ignore this status; menu tests do not.
+  python3 - "$config" "$event" "$message" "$force" <<'PY'
 import os, sys, urllib.request, urllib.parse, json
-cfg_path, event, message = sys.argv[1:4]
+cfg_path, event, message, force = sys.argv[1:5]
 # The config is root-owned mode 0600 and contains shell-escaped assignments.
 # Source it in a child bash and export only notification variables.
 keys = ["NOTIFY_METHOD", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "NTFY_URL", "NTFY_TOKEN", "WEBHOOK_URL", "NOTIFY_ON_SUCCESS", "NOTIFY_ON_FAILURE"]
 cmd = 'set -a; . "$1"; for k in ' + ' '.join(keys) + '; do printf "%s=%s\\n" "$k" "${!k-}"; done'
 import subprocess
 p = subprocess.run(["bash", "-c", cmd, "notify-env", cfg_path], capture_output=True, text=True)
+if p.returncode != 0:
+    print("[WARN] Unable to load notification settings from the protected config file.", file=sys.stderr)
+    sys.exit(1)
 env = {}
 for line in p.stdout.splitlines():
     if "=" in line:
@@ -199,9 +373,9 @@ for line in p.stdout.splitlines():
 method = env.get("NOTIFY_METHOD", "none").lower()
 if method in ("", "none", "off"):
     sys.exit(0)
-if event == "success" and env.get("NOTIFY_ON_SUCCESS", "true").lower() not in ("1", "true", "yes"):
+if force.lower() not in ("1", "true", "yes") and event == "success" and env.get("NOTIFY_ON_SUCCESS", "true").lower() not in ("1", "true", "yes"):
     sys.exit(0)
-if event != "success" and env.get("NOTIFY_ON_FAILURE", "true").lower() not in ("1", "true", "yes"):
+if force.lower() not in ("1", "true", "yes") and event != "success" and env.get("NOTIFY_ON_FAILURE", "true").lower() not in ("1", "true", "yes"):
     sys.exit(0)
 try:
     if method == "telegram":
@@ -227,7 +401,7 @@ try:
         if response.status < 200 or response.status >= 300: raise RuntimeError("HTTP status " + str(response.status))
 except Exception as exc:
     print("[WARN] Notification failed (backup status unchanged):", type(exc).__name__, file=sys.stderr)
-    sys.exit(0)
+    sys.exit(1)
 PY
 }
 
@@ -248,7 +422,7 @@ vw_perf_now_ms() {
 
 vw_perf_init() {
   local operation="$1" run_id="$2" file="${VW_PERF_FILE:-$VW_PERF_FILE_DEFAULT}"
-  if ! mkdir -p "$(dirname "$file")" /run/lock; then
+  if ! mkdir -p "$(dirname "$file")"; then
     echo "[WARN] 无法创建性能记录目录：$(dirname "$file")；备份/恢复继续执行，但本次不会保存性能记录。" >&2
     VW_PERF_STARTED=0
     return 0
@@ -271,6 +445,8 @@ vw_perf_init() {
   VW_PERF_TOTAL_START_MS=$(vw_perf_now_ms)
   VW_PERF_STAGE_START_MS=""
   VW_PERF_CURRENT_STAGE=""
+  VW_PERF_DOWNTIME_START_MS=""
+  VW_PERF_USER_WAIT_START_MS=""
   VW_PERF_STARTED=1
   VW_PERF_FINISHED=0
   export VW_PERF_FILE VW_PERF_OPERATION VW_PERF_RUN_ID VW_PERF_TOTAL_START_MS VW_PERF_STARTED VW_PERF_FINISHED
@@ -279,10 +455,10 @@ vw_perf_init() {
 
 vw_perf_append_row() {
   local stage="$1" duration_ms="$2" status="$3" bytes="${4:-0}"
-  local file="${VW_PERF_FILE:-$VW_PERF_FILE_DEFAULT}" lock_file="/run/lock/vaultwarden-performance.lock"
+  local file="${VW_PERF_FILE:-$VW_PERF_FILE_DEFAULT}" lock_file="${VW_PERF_LOCK_FILE:-/run/lock/vaultwarden-performance.lock}"
   local timestamp
   timestamp=$(date '+%F %T %Z')
-  if ! mkdir -p /run/lock "$(dirname "$file")"; then
+  if ! mkdir -p "$(dirname "$lock_file")" "$(dirname "$file")"; then
     echo "[WARN] 性能记录目录不可写：$(dirname "$file")" >&2
     return 0
   fi
@@ -333,14 +509,17 @@ vw_perf_stage_end() {
 }
 
 vw_perf_finish() {
-  local status="${1:-success}" now elapsed
+  local status="${1:-success}" now elapsed user_wait_ms
   [[ "${VW_PERF_STARTED:-0}" == 1 && "${VW_PERF_FINISHED:-0}" != 1 ]] || return 0
+  vw_perf_user_wait_end
   if [[ -n "${VW_PERF_CURRENT_STAGE:-}" ]]; then
     vw_perf_stage_end "$status" 0
   fi
   now=$(vw_perf_now_ms)
-  elapsed=$((now - ${VW_PERF_TOTAL_START_MS:-now}))
+  user_wait_ms=$(awk -F '\t' -v run_id="${VW_PERF_RUN_ID:-unknown}" '$3 == run_id && $4 == "USER_WAIT" {total += $5} END {print total + 0}' "${VW_PERF_FILE:-$VW_PERF_FILE_DEFAULT}" 2>/dev/null || echo 0)
+  elapsed=$((now - ${VW_PERF_TOTAL_START_MS:-now} - user_wait_ms))
   (( elapsed < 0 )) && elapsed=0
+  printf '[耗时] %-28s %8.3f 秒 (informational)\n' "USER_WAIT ${VW_PERF_OPERATION:-operation}" "$(awk -v ms="$user_wait_ms" 'BEGIN{printf "%.3f",ms/1000}')"
   vw_perf_append_row TOTAL "$elapsed" "$status" "${VW_PERF_ARTIFACT_BYTES:-0}"
   printf '[耗时] %-28s %8.3f 秒 (%s)\n' "TOTAL ${VW_PERF_OPERATION:-operation}" "$(awk -v ms="$elapsed" 'BEGIN{printf "%.3f",ms/1000}')" "$status"
   VW_PERF_FINISHED=1

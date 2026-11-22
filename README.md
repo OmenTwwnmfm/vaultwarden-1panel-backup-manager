@@ -10,7 +10,7 @@
 ![Panel](https://img.shields.io/badge/panel-1Panel-1677ff)
 ![Encryption](https://img.shields.io/badge/encryption-age-16a34a)
 ![Scheduler](https://img.shields.io/badge/scheduler-systemd-6d28d9)
-![Version](https://img.shields.io/badge/version-1.4.4-blue)
+![Version](https://img.shields.io/badge/version-1.4.5-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 </div>
@@ -34,6 +34,7 @@ Vaultwarden 将用户密码库保存在自己的服务器上，因此需要可�
 ### 性能监控与执行耗时分析
 
 - **阶段级计时**：备份分别记录容器发现、部署清单生成、容器停止、SQLite `quick_check`、完整 `/data` 快照与 age 加密、Docker 启动命令、启动后健康检查等待、本地校验、GitHub 同步/推送/远端核验；恢复分别记录容器停止、恢复前回滚快照、生产数据替换、Docker 启动命令和健康检查等待。
+- **停机与交互计时**：恢复总耗时扣除记录到的人工提示等待；另记录从停止服务到确认就绪的 `SERVICE_DOWNTIME` 汇总窗口，避免将最后按 Enter 的等待误读成恢复处理时间。
 - **恢复过程计时**：记录 GitHub 获取、解密与校验、恢复目标检查、恢复前停止容器、回滚快照加密/验证、生产数据替换、Docker 启动命令、健康检查等待及失败回滚步骤。
 - **历史趋势**：汇总最近 20 次操作，按最近 30 次操作计算各阶段平均耗时与最大耗时，帮助判断瓶颈是在 VPS 磁盘/CPU 还是 GitHub 网络。
 - **CSV 导出**：可将性能历史导出为 CSV，便于用 Excel 分析。
@@ -54,9 +55,12 @@ Vaultwarden 将用户密码库保存在自己的服务器上，因此需要可�
 - **自动发现容器**：每次备份重新扫描 Docker，不依赖 1Panel 生成的固定容器名后缀。
 - **数据路径身份保护**：以已确认的 `/data` 主机挂载路径作为实例身份；如果路径消失、改变或出现多个候选实例，安全停止而不是猜测。
 - **一致性快照**：备份窗口内短暂停止 Vaultwarden，打包整个 `/data`，包括 SQLite 数据库及其 WAL/SHM 文件（如存在）、附件、Send 文件、配置、RSA 密钥等；加密归档创建后立即尝试重启服务，网络上传在服务恢复后进行。
-- **SQLite 检查**：停止容器后可执行 `PRAGMA quick_check`；恢复暂存目录也会再次验证。
+- **SQLite 检查**：备份停止容器后执行 `PRAGMA quick_check`；恢复必须安装 `sqlite3` 并在覆盖生产数据前再次通过完整性检查。
 - **age 公钥加密**：服务器日常备份只需 age 公钥；age 私钥建议离线保存，不需要长期放在 VPS。
+- **可选本地解密验证**：若 VPS 配置了匹配私钥，仅在 `/dev/shm` 确认为 tmpfs 且空间足够时验证解密归档和 SQLite；否则跳过，不把明文数据目录写入持久磁盘。私钥仍建议离线保存。
 - **SHA256 与远端提交核验**：校验本地文件，并在 GitHub 推送后比较本地与远端分支提交 ID。
+- **本次运行结果**：每次运行有独立 ID 和阶段结果文件；锁冲突以退出码 `75` 明确标记跳过。升级前保护只接受本次的本地校验、服务恢复和远端核验成功结果。
+- **空间预检与快照保留**：在数据盘、备份目录、Git 工作目录和临时目录检查可用空间；加密快照完整生成后即保留，后续容器启动、健康探测或 GitHub 失败不会删除密文。
 - **GitHub 推送重试**：遇到临时网络错误时按配置重试；不会使用 `--force` 覆盖远程历史。
 - **主动健康探测与磁盘阈值**：备份前检查剩余磁盘空间。容器启动后，若 Docker Healthcheck 配置为 Vaultwarden 官方 `/healthcheck.sh`，管理器会在容器内每 2 秒主动执行同一个探针，连续 2 次成功即确认应用就绪，最长等待 120 秒，单次探测另有 12 秒超时保护；不修改 1Panel 管理的 Docker Healthcheck。非标准镜像回退到 Docker 原生状态轮询。
 
@@ -73,6 +77,8 @@ Vaultwarden 将用户密码库保存在自己的服务器上，因此需要可�
 
 - **交互式恢复**：从 GitHub 选择历史备份，检查 SHA256、age 私钥匹配、tar 清单和 SQLite 数据库，再进入恢复步骤。
 - **恢复前回滚**：替换生产数据之前，先把当前 `/data` 加密保存为本地回滚快照；失败时尝试自动回滚。
+- **恢复目标保护**：生产数据覆盖及回滚前，按已确认的 `/data` 主机路径重新确认唯一容器并验证已停止；不明状态或容器身份变化时中止。
+- **归档与数据库校验**：解压前拒绝路径穿越、符号/硬链接、特殊文件、重复路径和 setuid/setgid 条目；正式恢复必须通过 SQLite `quick_check`，并预检暂存分区空间。
 - **恢复后健康检查**：启动容器后优先主动执行 Vaultwarden `/healthcheck.sh`，每 2 秒探测一次、连续两次成功后立即继续；单次探测有 12 秒超时、总等待上限 120 秒。未通过时仍按安全策略尝试回滚到恢复前快照。
 - **恢复演练**：在临时目录解密并检查历史备份，不修改生产数据。
 - **历史备份管理**：列出 GitHub 当前分支中的备份，支持永久保留标记、取消标记和删除当前分支文件；自动过期清理会跳过已保护备份，并明确提醒 Git 历史仍可能保留旧对象。
@@ -110,6 +116,7 @@ Vaultwarden_1Panel_GitHub_Project/
 │   ├── vw-common.sh                 # 容器发现、配置保存、通知等公共函数
 │   ├── vw-backup.sh                 # systemd / 手动调用的非交互备份工作器
 │   ├── vw-restore-prepare.sh        # 校验、解密、暂存及 SQLite 检查
+│   ├── vw-archive-check.py          # 解压前的 tar 路径/文件类型安全检查
 │   ├── vw-manifest.py               # 生成已脱敏的部署清单
 │   ├── vw-diagnose.sh               # 生成脱敏诊断报告
 │   ├── vw-performance.py            # 性能历史汇总、明细与 CSV 导出
@@ -146,7 +153,7 @@ sudo bash ./run.sh
 
 每次通过 `sudo bash ./run.sh` 启动时，启动器都会自动安装或修复全局命令 `/usr/local/bin/vbm`。之后在 VPS 任意目录执行 `vbm` 即可进入菜单。
 
-本项目源码仓库为 Public，任何人都可以通过 HTTPS 克隆，不需要 GitHub 账号、SSH 密钥或 Token。只有独立的数据备份仓库必须保持 Private。首次配置需要交互式终端，不要通过 systemd 或后台脚本启动配置向导。
+本项目源码仓库为 Public，任何人都可以通过 HTTPS 克隆，不需要 GitHub 账号、SSH 密钥或 Token。只有独立的数据备份仓库必须保持 Private。推荐安装到 `/opt` 下 root 所有且不可被其他用户修改的项目目录；启动器会拒绝从普通用户可写路径以 root 运行。首次配置需要交互式终端，不要通过 systemd 或后台脚本启动配置向导。
 
 ### 3. 首次配置
 
@@ -265,7 +272,7 @@ tail -n 100 /var/log/vaultwarden-backup.log
 |---|---|
 | 20 | 性能监控与执行耗时分析（备份 / 恢复 / GitHub / 校验） |
 
-输入 `00` 或 `0` 退出。性能记录保存在 `/var/lib/vaultwarden-backup/performance.tsv`；通过菜单 20 可查看最近运行、阶段平均/最大耗时、指定运行详情并导出 CSV。总耗时包含交互式等待，定位纯处理瓶颈时应重点比较各阶段耗时。详细操作见 [`docs/完整使用手册.md`](docs/完整使用手册.md)。
+输入 `00` 或 `0` 退出。性能记录保存在 `/var/lib/vaultwarden-backup/performance.tsv`；通过菜单 20 可查看最近运行、阶段平均/最大耗时、指定运行详情并导出 CSV。恢复总耗时扣除可观测的提示等待，另显示人工等待和服务停机窗口。详细操作见 [`docs/完整使用手册.md`](docs/完整使用手册.md)。
 
 ## 通知配置
 
@@ -325,6 +332,7 @@ tail -n 100 /var/log/vaultwarden-backup.log
 
 - GitHub 源码仓库与备份仓库必须分开。
 - age 私钥必须离线保存；私钥丢失后，加密备份无法恢复。
+- 管理器需要从 root 所有且不可由普通用户修改的项目目录运行；推荐按照快速开始安装到 `/opt`，不要从普通用户可写的目录以 root 启动。
 - GitHub SSH Deploy Key 与 age 密钥用途不同；SSH 密钥泄露不等于可以解密 age 备份，但可能允许访问仓库。
 - 不要将真实 `/etc/vaultwarden-backup.conf`、私钥、Token、数据库、附件或 `.age` 文件提交到源码仓库。
 - 恢复操作具有破坏性，必须逐项核对实例和路径；测试环境演练优先于直接在生产环境首次恢复。

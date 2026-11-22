@@ -13,13 +13,43 @@ fi
 
 if [[ "$EUID" -ne 0 ]]; then
   if command -v sudo >/dev/null 2>&1; then
-    exec sudo -E bash "$0" "$@"
+    exec sudo env VBM_PROJECT_ROOT="$PROJECT_DIR" bash "$0" "$@"
   fi
   echo "错误：请使用 root 运行此脚本。" >&2
   exit 1
 fi
 
-for required in "$MANAGER" "$PROJECT_DIR/scripts/vw-common.sh" "$PROJECT_DIR/scripts/vw-backup.sh" "$PROJECT_DIR/scripts/vw-restore-prepare.sh" "$PROJECT_DIR/scripts/vw-manifest.py" "$PROJECT_DIR/scripts/vw-diagnose.sh" "$PROJECT_DIR/scripts/vw-performance.py" "$PROJECT_DIR/scripts/vbm-launcher.sh"; do
+unset VW_CONFIG_FILE VW_LOG_FILE VW_LOCK_FILE VW_STATE_DIR VW_COMMON_LIB VW_MANIFEST_TOOL VW_ARCHIVE_CHECK_TOOL VW_MIN_FREE_MB VW_PERF_FILE VW_PERF_LOCK_FILE VW_DIAG_REPORT_DIR
+
+check_root_owned_tree() {
+  local path="$PROJECT_DIR" owner mode bad_entry
+  while :; do
+    read -r owner mode < <(stat -c '%u %a' -- "$path") || return 1
+    [[ "$owner" == 0 ]] && (( (8#$mode & 022) == 0 )) || {
+      echo "错误：项目路径必须由 root 所有且不可被组/其他用户写入：$path" >&2
+      return 1
+    }
+    [[ "$path" == / ]] && break
+    path=$(dirname -- "$path")
+  done
+  for path in "$PROJECT_DIR/scripts" "$PROJECT_DIR/.git"; do
+    [[ -e "$path" ]] || continue
+    bad_entry=$(find "$path" -xdev \( -type l -o ! -user root -o -perm /022 \) -print -quit 2>/dev/null)
+    if [[ -n "$bad_entry" ]]; then
+      echo "错误：拒绝 root 执行非 root 所有或可被修改的项目文件：$bad_entry" >&2
+      return 1
+    fi
+  done
+  bad_entry=$(find "$PROJECT_DIR" -maxdepth 1 \( -type l -o \( -type f \( ! -user root -o -perm /022 \) \) \) -print -quit 2>/dev/null)
+  if [[ -n "$bad_entry" ]]; then
+    echo "错误：拒绝 root 执行非 root 所有或可被修改的项目文件：$bad_entry" >&2
+    return 1
+  fi
+}
+
+check_root_owned_tree || exit 1
+
+for required in "$MANAGER" "$PROJECT_DIR/scripts/vw-common.sh" "$PROJECT_DIR/scripts/vw-backup.sh" "$PROJECT_DIR/scripts/vw-restore-prepare.sh" "$PROJECT_DIR/scripts/vw-archive-check.py" "$PROJECT_DIR/scripts/vw-manifest.py" "$PROJECT_DIR/scripts/vw-diagnose.sh" "$PROJECT_DIR/scripts/vw-performance.py" "$PROJECT_DIR/scripts/vbm-launcher.sh"; do
   if [[ ! -f "$required" ]]; then
     echo "错误：项目文件不完整，缺少：$required" >&2
     echo "请从 GitHub 下载/克隆完整项目目录，不要只下载 run.sh。" >&2

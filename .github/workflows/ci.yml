@@ -1,0 +1,33 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+      - name: Check shell syntax
+        run: |
+          for script in run.sh scripts/*.sh tests/*.sh; do bash -n "$script"; done
+      - name: Run ShellCheck
+        run: shellcheck --severity=error run.sh scripts/*.sh tests/*.sh
+      - name: Run shell tests
+        run: |
+          for test in tests/*.sh; do bash "$test"; done
+      - name: Run Python tests
+        run: |
+          python -B tests/test-archive-check.py
+          python -B -m compileall -q scripts tests

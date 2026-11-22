@@ -25,6 +25,8 @@ STAGE_LABELS = {
     "readiness_probe_confirmation": "第二次主动探测确认（含探测间隔）",
     "docker_native_health_observation": "Docker 原生 Health 状态读取",
     "docker_native_health_poll_wait": "兼容模式：Docker 原生 Health 等待",
+    "USER_WAIT": "人工输入等待",
+    "SERVICE_DOWNTIME": "Vaultwarden 服务停机窗口（汇总）",
     "recovery_container_start_command": "异常恢复：Docker 启动命令",
     "recovery_health_check_wait": "异常恢复：健康检查等待（汇总）",
     "local_validation_manifest_checksum": "本地校验/清单加密/SHA256",
@@ -82,7 +84,7 @@ def main():
             print(f"性能记录文件存在，但目前只有表头或没有有效记录：{path}")
         else:
             print(f"尚无性能记录文件：{path}")
-        print("v1.4.4 会记录容器停止、SQLite 检查、快照加密、Docker 启动命令，以及 Vaultwarden 主动 /healthcheck.sh 探测阶段。")
+        print("v1.4.5 会记录容器停止、SQLite 检查、快照加密、Docker 启动命令、主动健康探测、人工等待和服务停机窗口。")
         print("systemd 后台任务使用 /usr/local/sbin/vw-backup.sh；项目更新后请先运行菜单 07 同步后台脚本。")
         print("完成一次手动备份或恢复后，请检查日志中是否出现 [性能] 和 [耗时] 行。")
         return 0
@@ -155,7 +157,7 @@ def main():
     print("Docker 原生 Healthcheck 配置不会被修改；其状态可能要等到原生 60 秒周期后才从 starting 更新。")
     print("父级健康检查行标记为 aggregate，仅作总等待参考，不会和主动探测子阶段重复计入阶段平均值/占比。")
     print("GitHub 同步/推送耗时主要受 VPS 到 GitHub 的网络影响；主动健康探测耗时反映 Vaultwarden /alive 实际就绪时间。")
-    print("总耗时包含交互式操作等待时间；分析纯处理性能时，请重点比较各阶段耗时。")
+    print("恢复总耗时扣除已记录的人工输入等待；USER_WAIT 与 SERVICE_DOWNTIME 是 informational/aggregate 汇总，不重复计入阶段统计。")
     print("性能文件仅记录阶段名称、时长、状态和字节数，不记录密码或 Token。")
     return 0
 

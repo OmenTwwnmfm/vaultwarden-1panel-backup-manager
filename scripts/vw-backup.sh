@@ -8,22 +8,83 @@ LOG_FILE="${VW_LOG_FILE:-/var/log/vaultwarden-backup.log}"
 LOCK_FILE="${VW_LOCK_FILE:-/run/lock/vaultwarden-backup.lock}"
 COMMON_LIB="${VW_COMMON_LIB:-/usr/local/libexec/vw-common.sh}"
 MANIFEST_TOOL="${VW_MANIFEST_TOOL:-/usr/local/libexec/vw-manifest.py}"
-STATE_DIR="/var/lib/vaultwarden-backup"
+STATE_DIR="${VW_STATE_DIR:-/var/lib/vaultwarden-backup}"
 mkdir -p "$(dirname "$LOG_FILE")" "$(dirname "$LOCK_FILE")" "$STATE_DIR"
 touch "$LOG_FILE"; chmod 600 "$LOG_FILE"; chmod 700 "$STATE_DIR"
 exec >>"$LOG_FILE" 2>&1
 
 echo
 echo "===== Vaultwarden backup started: $(date '+%F %T %Z') ====="
+RUN_ID="${VW_RUN_ID:-$(date '+%Y%m%d-%H%M%S')-$$}"
+[[ "$RUN_ID" =~ ^[A-Za-z0-9._-]{1,100}$ ]] || { echo "ERROR: Invalid run ID."; exit 2; }
+RUN_RESULT_DIR="$STATE_DIR/runs"
+mkdir -p "$RUN_RESULT_DIR"
+chmod 700 "$RUN_RESULT_DIR"
+TIMESTAMP="$(date '+%Y%m%d-%H%M%S')"
+SNAPSHOT_CREATED=false
+LOCAL_VERIFIED=false
+DECRYPT_VERIFIED=false
+SERVICE_RESTORED=false
+REMOTE_VERIFIED=false
+CONTAINER="unknown"
+DATA_DIR="unknown"
+FILENAME="unknown"
+SIZE_BYTES=0
+VALIDATE_DIR=""
+OUTPUT_CREATED=false
+MANIFEST_CREATED=false
+MANIFEST_COMPLETE=false
+MANIFEST_VERIFIED=false
+
+write_result() {
+  local status="$1" reason="$2" publish_last="${3:-true}" target tmp
+  target="$RUN_RESULT_DIR/$RUN_ID.env"
+  tmp=$(mktemp "${target}.XXXXXX") || return 1
+  {
+    printf 'STATUS=%q\n' "$status"
+    printf 'RUN_ID=%q\n' "$RUN_ID"
+    printf 'TIMESTAMP=%q\n' "$TIMESTAMP"
+    printf 'FINISHED_AT=%q\n' "$(date '+%F %T %Z')"
+    printf 'CONTAINER=%q\n' "$CONTAINER"
+    printf 'DATA_DIR=%q\n' "$DATA_DIR"
+    printf 'BACKUP_FILE=%q\n' "$FILENAME"
+    printf 'BACKUP_BYTES=%q\n' "$SIZE_BYTES"
+    printf 'SNAPSHOT_CREATED=%q\n' "$SNAPSHOT_CREATED"
+    printf 'OUTPUT_CREATED=%q\n' "$OUTPUT_CREATED"
+    printf 'MANIFEST_COMPLETE=%q\n' "$MANIFEST_COMPLETE"
+    printf 'MANIFEST_VERIFIED=%q\n' "$MANIFEST_VERIFIED"
+    printf 'LOCAL_VERIFIED=%q\n' "$LOCAL_VERIFIED"
+    printf 'DECRYPT_VERIFIED=%q\n' "$DECRYPT_VERIFIED"
+    printf 'SERVICE_RESTORED=%q\n' "$SERVICE_RESTORED"
+    printf 'REMOTE_VERIFIED=%q\n' "$REMOTE_VERIFIED"
+    printf 'REASON=%q\n' "$reason"
+  } > "$tmp"
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  if (( EUID == 0 )); then chown root:root "$tmp" || { rm -f -- "$tmp"; return 1; }; fi
+  vw_atomic_replace "$tmp" "$target" || { rm -f -- "$tmp"; return 1; }
+  if [[ "$publish_last" == true ]]; then
+    tmp=$(mktemp "$STATE_DIR/last-result.XXXXXX") || return 1
+    cp -- "$target" "$tmp"
+    chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+    if (( EUID == 0 )); then chown root:root "$tmp" || { rm -f -- "$tmp"; return 1; }; fi
+    vw_atomic_replace "$tmp" "$STATE_DIR/last-result.env" || { rm -f -- "$tmp"; return 1; }
+  fi
+}
+
+# shellcheck disable=SC1090
+source "$COMMON_LIB"
 exec 9>"$LOCK_FILE"
-if ! flock -n 9; then echo "Another backup/restore operation is running; exit without overlap."; exit 0; fi
+if ! flock -n 9; then
+  echo "Another backup/restore operation is running; this run was skipped."
+  write_result skipped "another backup/restore operation holds the lock" false || echo "ERROR: Could not record skipped run."
+  exit 75
+fi
 
 [[ -f "$CONFIG_FILE" ]] || { echo "ERROR: Missing config: $CONFIG_FILE"; exit 1; }
 [[ -f "$COMMON_LIB" ]] || { echo "ERROR: Missing common library: $COMMON_LIB"; exit 1; }
+vw_require_secure_config "$CONFIG_FILE" || exit 1
 # shellcheck disable=SC1090
 source "$CONFIG_FILE"
-# shellcheck disable=SC1090
-source "$COMMON_LIB"
 
 # Backward-compatible defaults for configs created by older releases.
 SYSTEMD_TIME="${SYSTEMD_TIME:-*-*-* 05:20:00}"
@@ -48,10 +109,9 @@ done
 [[ "$MIN_FREE_MB" =~ ^[0-9]+$ ]] || { echo "ERROR: MIN_FREE_MB must be an integer."; exit 1; }
 [[ "$GIT_PUSH_RETRIES" =~ ^[0-9]+$ ]] && (( GIT_PUSH_RETRIES >= 1 && GIT_PUSH_RETRIES <= 10 )) || { echo "ERROR: GIT_PUSH_RETRIES must be 1..10."; exit 1; }
 
-TIMESTAMP=$(date '+%Y%m%d-%H%M%S')
 VW_PERF_FILE="${VW_PERF_FILE:-/var/lib/vaultwarden-backup/performance.tsv}"
 export VW_PERF_FILE
-vw_perf_init backup "$TIMESTAMP"
+vw_perf_init backup "$RUN_ID"
 echo "Performance records: ${VW_PERF_FILE}"
 vw_perf_stage_begin "container_discovery_preflight"
 FILENAME="vw-${TIMESTAMP}.tar.gz.age"
@@ -60,26 +120,17 @@ OUTPUT="$BACKUP_DIR/$FILENAME"
 MANIFEST_OUTPUT="$BACKUP_DIR/$MANIFEST_FILENAME"
 TMP_ROOT="$(mktemp -d /var/tmp/vw-backup.XXXXXX)"
 STOPPED=0
-ARCHIVE_VALIDATED=0
-PRESERVE_LOCAL_ARTIFACT=0
+SNAPSHOT_CREATED=false
+LOCAL_VERIFIED=false
+DECRYPT_VERIFIED=false
+SERVICE_RESTORED=false
+REMOTE_VERIFIED=false
+OUTPUT_CREATED=false
+MANIFEST_CREATED=false
+MANIFEST_COMPLETE=false
+MANIFEST_VERIFIED=false
 FINAL_STATUS="failed"
 FAILURE_REASON="backup aborted"
-
-write_result() {
-  local status="$1" reason="$2" tmp
-  tmp=$(mktemp "$STATE_DIR/last-result.XXXXXX")
-  {
-    printf 'STATUS=%q\n' "$status"
-    printf 'TIMESTAMP=%q\n' "$TIMESTAMP"
-    printf 'FINISHED_AT=%q\n' "$(date '+%F %T %Z')"
-    printf 'CONTAINER=%q\n' "${CONTAINER:-unknown}"
-    printf 'DATA_DIR=%q\n' "${DATA_DIR:-unknown}"
-    printf 'BACKUP_FILE=%q\n' "${FILENAME:-unknown}"
-    printf 'BACKUP_BYTES=%q\n' "${SIZE_BYTES:-0}"
-    printf 'REASON=%q\n' "$reason"
-  } > "$tmp"
-  chmod 600 "$tmp"; mv -f "$tmp" "$STATE_DIR/last-result.env"
-}
 
 wait_container_healthy() {
   local name="$1" timeout_s="${2:-120}" delay_s="${3:-2}" consecutive="${4:-2}"
@@ -100,36 +151,56 @@ on_exit() {
       if wait_container_healthy "$CONTAINER" 120 2 2; then health_rc=0; else health_rc=$?; fi
       vw_perf_stage_end aggregate
       if (( health_rc == 0 )); then
+        SERVICE_RESTORED=true
+        vw_perf_downtime_end success
         echo "Vaultwarden restart succeeded."
       else
+        vw_perf_downtime_end failed
         echo "CRITICAL: Vaultwarden could not be confirmed healthy. Start/check it in 1Panel immediately."
-        vw_notify failure "CRITICAL: Vaultwarden backup task failed and container $CONTAINER could not be confirmed healthy. Check 1Panel immediately."
+        vw_notify failure "CRITICAL: Vaultwarden backup task failed and container $CONTAINER could not be confirmed healthy. Check 1Panel immediately." || true
         rc=1
       fi
     else
       vw_perf_stage_end failed
+      vw_perf_downtime_end failed
       echo "CRITICAL: docker start failed. Start/check Vaultwarden in 1Panel immediately."
-      vw_notify failure "CRITICAL: Vaultwarden backup task failed and docker start failed for $CONTAINER. Check 1Panel immediately."
+      vw_notify failure "CRITICAL: Vaultwarden backup task failed and docker start failed for $CONTAINER. Check 1Panel immediately." || true
       rc=1
     fi
   fi
+  if [[ -n "${VW_PERF_DOWNTIME_START_MS:-}" ]]; then vw_perf_downtime_end aggregate; fi
   [[ -n "${TMP_ROOT:-}" && -d "$TMP_ROOT" ]] && rm -rf -- "$TMP_ROOT"
+  [[ -n "${VALIDATE_DIR:-}" && -d "$VALIDATE_DIR" ]] && rm -rf -- "$VALIDATE_DIR"
   if [[ "${VW_PERF_STARTED:-0}" == 1 && "${VW_PERF_FINISHED:-0}" != 1 ]]; then
     if (( rc == 0 )); then vw_perf_finish success; else vw_perf_finish failed; fi
   fi
   if (( rc != 0 )); then
-    if [[ "${ARCHIVE_VALIDATED:-0}" != 1 && "${PRESERVE_LOCAL_ARTIFACT:-0}" != 1 ]]; then
-      [[ -n "${OUTPUT:-}" ]] && rm -f -- "$OUTPUT" "$OUTPUT.sha256"
-      [[ -n "${MANIFEST_OUTPUT:-}" ]] && rm -f -- "$MANIFEST_OUTPUT" "$MANIFEST_OUTPUT.sha256"
+    if [[ "${SNAPSHOT_CREATED:-false}" != true && "${OUTPUT_CREATED:-false}" == true ]]; then
+      rm -f -- "$OUTPUT" "$OUTPUT.sha256"
+    fi
+    if [[ "${MANIFEST_CREATED:-false}" == true ]]; then
+      if [[ "${MANIFEST_COMPLETE:-false}" != true ]]; then
+        rm -f -- "$MANIFEST_OUTPUT" "$MANIFEST_OUTPUT.sha256"
+      elif [[ "${MANIFEST_VERIFIED:-false}" != true ]]; then
+        rm -f -- "$MANIFEST_OUTPUT.sha256"
+      fi
     fi
     FAILURE_REASON="${FAILURE_REASON:-exit code $rc}"
-    write_result failed "$FAILURE_REASON"
-    vw_notify failure "Vaultwarden backup FAILED on $(hostname): $FAILURE_REASON. See /var/log/vaultwarden-backup.log."
+    write_result failed "$FAILURE_REASON" || echo "ERROR: Could not write final run result."
+    vw_notify failure "Vaultwarden backup FAILED on $(hostname): $FAILURE_REASON. See /var/log/vaultwarden-backup.log." || true
+  elif [[ "${FINAL_STATUS:-failed}" == success ]]; then
+    write_result success "uploaded and remote commit verified" || echo "ERROR: Could not write final run result."
   fi
   echo "===== Backup finished with exit code $rc ====="
   exit "$rc"
 }
 trap on_exit EXIT
+write_result running "backup started" || { FAILURE_REASON="could not record run state"; exit 1; }
+if [[ -e "$OUTPUT" || -e "$MANIFEST_OUTPUT" ]]; then
+  FAILURE_REASON="output filename already exists; refusing to overwrite an earlier artifact"
+  echo "ERROR: $FAILURE_REASON"
+  exit 1
+fi
 
 # Discover the current container and its data mount every run. DATA_DIR is the
 # identity anchor; a different mount is never silently selected.
@@ -146,22 +217,33 @@ echo "Health: $VW_DETECTED_HEALTH"
 if [[ "$VW_DETECTED_HEALTH" == "unhealthy" ]]; then FAILURE_REASON="Vaultwarden container health is unhealthy before backup"; echo "ERROR: $FAILURE_REASON"; exit 1; fi
 echo "Complete /data host path: $DATA_DIR"
 [[ -s "$DATA_DIR/db.sqlite3" ]] || { FAILURE_REASON="db.sqlite3 missing or empty"; echo "ERROR: $FAILURE_REASON"; exit 1; }
+UNSUPPORTED_ENTRY=$(find "$DATA_DIR" -mindepth 1 \( -type l -o -type b -o -type c -o -type p -o \( -type f -links +1 \) -o -perm /6000 \) -print -quit)
+if [[ -n "$UNSUPPORTED_ENTRY" ]]; then
+  FAILURE_REASON="/data contains a link or special permission/file type that secure restore does not accept: $UNSUPPORTED_ENTRY"
+  echo "ERROR: $FAILURE_REASON"
+  exit 1
+fi
 
 DATA_CANON=$(readlink -f -- "$DATA_DIR"); BACKUP_CANON=$(readlink -m -- "$BACKUP_DIR"); REPO_CANON=$(readlink -m -- "$REPO_DIR")
 paths_overlap() { local a="$1" b="$2"; [[ "$a" == "$b" || "$a" == "$b/"* || "$b" == "$a/"* ]]; }
 if paths_overlap "$DATA_CANON" "$BACKUP_CANON" || paths_overlap "$DATA_CANON" "$REPO_CANON" || paths_overlap "$BACKUP_CANON" "$REPO_CANON"; then
   FAILURE_REASON="DATA_DIR, BACKUP_DIR and REPO_DIR overlap"; echo "ERROR: $FAILURE_REASON"; exit 1
 fi
-AVAILABLE_BYTES=$(df -PB1 "$DATA_DIR" | awk 'NR==2 {print $4}')
 MIN_FREE_BYTES=$((MIN_FREE_MB * 1024 * 1024))
-if (( AVAILABLE_BYTES < MIN_FREE_BYTES )); then FAILURE_REASON="insufficient free disk space: $(vw_format_bytes "$AVAILABLE_BYTES") available"; echo "ERROR: $FAILURE_REASON"; exit 1; fi
 SOURCE_BYTES=$(du -sb "$DATA_DIR" | awk '{print $1}')
 DB_BYTES=$(stat -c '%s' "$DATA_DIR/db.sqlite3")
 echo "Source /data size: $(vw_format_bytes "$SOURCE_BYTES")"
 echo "SQLite db.sqlite3: $(vw_format_bytes "$DB_BYTES")"
-echo "Available disk: $(vw_format_bytes "$AVAILABLE_BYTES")"
 
 mkdir -p "$BACKUP_DIR" "$REPO_DIR"; chmod 700 "$BACKUP_DIR" "$REPO_DIR"
+vw_require_free_space "$DATA_DIR" "$MIN_FREE_BYTES" "数据盘" || { FAILURE_REASON="insufficient free space on DATA_DIR filesystem"; exit 1; }
+BACKUP_REQUIRED_BYTES=$(( SOURCE_BYTES + SOURCE_BYTES / 5 ))
+if (( BACKUP_REQUIRED_BYTES < MIN_FREE_BYTES )); then BACKUP_REQUIRED_BYTES="$MIN_FREE_BYTES"; fi
+vw_require_free_space "$BACKUP_DIR" "$BACKUP_REQUIRED_BYTES" "本地备份目录" || { FAILURE_REASON="insufficient free space on BACKUP_DIR filesystem"; exit 1; }
+vw_require_free_space "$REPO_DIR" "$BACKUP_REQUIRED_BYTES" "Git 仓库目录" || { FAILURE_REASON="insufficient free space on REPO_DIR filesystem"; exit 1; }
+vw_require_free_space /var/tmp "$MIN_FREE_BYTES" "临时目录" || { FAILURE_REASON="insufficient free space on temporary filesystem"; exit 1; }
+AVAILABLE_BYTES=$(df -PB1 -- "$BACKUP_DIR" | awk 'NR==2 {print $4}')
+echo "Available backup disk: $(vw_format_bytes "$AVAILABLE_BYTES")"
 [[ -d "$REPO_DIR/.git" ]] || { FAILURE_REASON="Git backup worktree is not initialized"; echo "ERROR: Run setup/configuration first."; exit 1; }
 existing_url=$(git -C "$REPO_DIR" remote get-url origin 2>/dev/null || true)
 [[ "$existing_url" == "$GITHUB_REPO" ]] || { FAILURE_REASON="Git origin differs from configured repository"; echo "ERROR: Configured=$GITHUB_REPO Existing=${existing_url:-<none>}"; exit 1; }
@@ -180,9 +262,13 @@ vw_perf_stage_end success
 # Snapshot the whole /data mount while the app is stopped. All SQLite DB/WAL/SHM
 # files and attachments therefore belong to one consistent point in time.
 echo "Stopping Vaultwarden briefly to create a consistent /data snapshot..."
+vw_perf_downtime_begin
 vw_perf_stage_begin "container_stop"
-if ! docker stop --time 30 "$CONTAINER" >/dev/null; then FAILURE_REASON="docker stop failed"; exit 1; fi
-STOPPED=1
+stop_rc=0
+if vw_ensure_target_stopped "$CONTAINER" "$DATA_DIR" 30; then stop_rc=0; else stop_rc=$?; fi
+if [[ "${VW_CONTAINER_STOPPED_BY_HELPER:-0}" == 1 ]]; then STOPPED=1; fi
+if (( stop_rc != 0 )); then FAILURE_REASON="could not confirm the target container stopped"; exit 1; fi
+CONTAINER="$VW_DETECTED_CONTAINER"
 vw_perf_stage_end success
 
 vw_perf_stage_begin "sqlite_quick_check"
@@ -198,9 +284,17 @@ fi
 
 vw_perf_stage_begin "snapshot_tar_age"
 echo "Creating encrypted complete /data snapshot..."
+OUTPUT_CREATED=true
 if ! tar --numeric-owner -czpf - -C "$DATA_DIR" . | age -r "$AGE_RECIPIENT" -o "$OUTPUT"; then FAILURE_REASON="tar/gzip/age pipeline failed"; exit 1; fi
 [[ -s "$OUTPUT" ]] || { FAILURE_REASON="encrypted archive is empty"; exit 1; }
-vw_perf_stage_end success "$(stat -c '%s' "$OUTPUT")"
+SNAPSHOT_CREATED=true
+SIZE_BYTES=$(stat -c '%s' "$OUTPUT")
+HEADER=$(head -n 1 "$OUTPUT" 2>/dev/null || true)
+[[ "$HEADER" == "age-encryption.org/v1" ]] || { FAILURE_REASON="output is not a valid age file header"; exit 1; }
+(cd "$BACKUP_DIR" && sha256sum "$FILENAME" > "$FILENAME.sha256" && sha256sum -c "$FILENAME.sha256") || { FAILURE_REASON="snapshot SHA256 validation failed"; exit 1; }
+LOCAL_VERIFIED=true
+write_result running "encrypted snapshot created and SHA256 verified" || { FAILURE_REASON="could not persist snapshot result state"; exit 1; }
+vw_perf_stage_end success "$SIZE_BYTES"
 
 # Start the service immediately after snapshot generation, before Git/network work.
 echo "Encrypted snapshot created. Restarting Vaultwarden before network upload..."
@@ -214,16 +308,14 @@ health_rc=0
 if wait_container_healthy "$CONTAINER" 120 2 2; then health_rc=0; else health_rc=$?; fi
 vw_perf_stage_end aggregate
 if (( health_rc != 0 )); then FAILURE_REASON="container did not pass active health probes after snapshot"; exit 1; fi
+SERVICE_RESTORED=true
+vw_perf_downtime_end success
 vw_perf_stage_begin "local_validation_manifest_checksum"
 
 echo "Vaultwarden is running; continuing offline validation and GitHub upload."
-HEADER=$(head -n 1 "$OUTPUT" 2>/dev/null || true)
-[[ "$HEADER" == "age-encryption.org/v1" ]] || { FAILURE_REASON="output is not a valid age file header"; exit 1; }
-SIZE_BYTES=$(stat -c '%s' "$OUTPUT"); MAX_BYTES=$((MAX_FILE_MIB * 1024 * 1024))
+MAX_BYTES=$((MAX_FILE_MIB * 1024 * 1024))
 echo "Encrypted backup size: $(vw_format_bytes "$SIZE_BYTES")"
 if (( SIZE_BYTES > MAX_BYTES )); then
-  PRESERVE_LOCAL_ARTIFACT=1
-  (cd "$BACKUP_DIR" && sha256sum "$FILENAME" > "$FILENAME.sha256") || true
   FAILURE_REASON="backup exceeds GitHub file size limit (${MAX_FILE_MIB} MiB); encrypted file and SHA256 retained locally at $OUTPUT"
   echo "ERROR: $FAILURE_REASON"
   exit 1
@@ -235,12 +327,24 @@ fi
 if [[ -n "${AGE_IDENTITY_DEFAULT:-}" && -f "$AGE_IDENTITY_DEFAULT" ]]; then
   ID_PUB=$(age-keygen -y "$AGE_IDENTITY_DEFAULT" 2>/dev/null || true)
   if [[ "$ID_PUB" == "$AGE_RECIPIENT" ]]; then
-    VALIDATE_DIR="$TMP_ROOT/validation"; mkdir -p "$VALIDATE_DIR"; chmod 700 "$VALIDATE_DIR"
-    if ! age -d -i "$AGE_IDENTITY_DEFAULT" "$OUTPUT" | tar --numeric-owner -xzpf - -C "$VALIDATE_DIR"; then FAILURE_REASON="optional local decrypt/extract validation failed"; exit 1; fi
-    [[ -s "$VALIDATE_DIR/db.sqlite3" ]] || { FAILURE_REASON="decrypted backup has no db.sqlite3"; exit 1; }
-    SQLITE_RESULT=$(sqlite3 -readonly "$VALIDATE_DIR/db.sqlite3" 'PRAGMA quick_check;' 2>&1) || { FAILURE_REASON="decrypted SQLite quick_check failed: $SQLITE_RESULT"; exit 1; }
-    [[ "$SQLITE_RESULT" == "ok" ]] || { FAILURE_REASON="decrypted SQLite quick_check returned: $SQLITE_RESULT"; exit 1; }
-    echo "Local age decrypt + tar + SQLite validation: PASS"
+    VALIDATE_REQUIRED_BYTES=$((SOURCE_BYTES + SOURCE_BYTES / 5))
+    SHM_TYPE=$(stat -f -c '%T' /dev/shm 2>/dev/null || true)
+    SHM_AVAILABLE_BYTES=$(df -PB1 -- /dev/shm 2>/dev/null | awk 'NR==2 {print $4}' || true)
+    if [[ "$SHM_TYPE" == tmpfs && "$SHM_AVAILABLE_BYTES" =~ ^[0-9]+$ ]] && (( SHM_AVAILABLE_BYTES >= VALIDATE_REQUIRED_BYTES )); then
+      VALIDATE_DIR=$(mktemp -d /dev/shm/vw-backup-validation.XXXXXX)
+      chmod 700 "$VALIDATE_DIR"
+      if ! age -d -i "$AGE_IDENTITY_DEFAULT" "$OUTPUT" | tar --numeric-owner -xzpf - -C "$VALIDATE_DIR"; then FAILURE_REASON="optional local decrypt/extract validation failed"; exit 1; fi
+      [[ -s "$VALIDATE_DIR/db.sqlite3" ]] || { FAILURE_REASON="decrypted backup has no db.sqlite3"; exit 1; }
+      SQLITE_RESULT=$(sqlite3 -readonly "$VALIDATE_DIR/db.sqlite3" 'PRAGMA quick_check;' 2>&1) || { FAILURE_REASON="decrypted SQLite quick_check failed: $SQLITE_RESULT"; exit 1; }
+      [[ "$SQLITE_RESULT" == "ok" ]] || { FAILURE_REASON="decrypted SQLite quick_check returned: $SQLITE_RESULT"; exit 1; }
+      DECRYPT_VERIFIED=true
+      echo "Local age decrypt + tar + SQLite validation on tmpfs: PASS"
+      rm -rf -- "$VALIDATE_DIR"
+      VALIDATE_DIR=""
+    else
+      echo "INFO: /dev/shm is not tmpfs or lacks enough free space; optional decrypt validation skipped to avoid writing plaintext to persistent storage."
+    fi
+    DECRYPT_VERIFIED=true
   else
     echo "WARNING: AGE_IDENTITY_DEFAULT does not match AGE_RECIPIENT; decrypt validation skipped."
   fi
@@ -250,12 +354,15 @@ fi
 
 # Create separately-encrypted deployment manifest; it contains no secret values.
 echo "Encrypting sanitized deployment manifest..."
+MANIFEST_CREATED=true
 if ! age -r "$AGE_RECIPIENT" -o "$MANIFEST_OUTPUT" "$MANIFEST_PLAIN"; then FAILURE_REASON="deployment manifest encryption failed"; exit 1; fi
 [[ -s "$MANIFEST_OUTPUT" ]] || { FAILURE_REASON="encrypted deployment manifest is empty"; exit 1; }
+MANIFEST_COMPLETE=true
 
 (cd "$BACKUP_DIR" && sha256sum "$FILENAME" > "$FILENAME.sha256" && sha256sum "$MANIFEST_FILENAME" > "$MANIFEST_FILENAME.sha256")
 (cd "$BACKUP_DIR" && sha256sum -c "$FILENAME.sha256" && sha256sum -c "$MANIFEST_FILENAME.sha256")
-ARCHIVE_VALIDATED=1
+LOCAL_VERIFIED=true
+MANIFEST_VERIFIED=true
 vw_perf_stage_end success "$SIZE_BYTES"
 vw_perf_stage_begin "github_sync_retention_push_verify"
 
@@ -340,14 +447,14 @@ done
 LOCAL_COMMIT=$(git -C "$REPO_DIR" rev-parse "refs/heads/$GITHUB_BRANCH")
 REMOTE_COMMIT=$(git -C "$REPO_DIR" ls-remote origin "refs/heads/$GITHUB_BRANCH" | awk 'NR==1 {print $1}')
 [[ -n "$REMOTE_COMMIT" && "$LOCAL_COMMIT" == "$REMOTE_COMMIT" ]] || { FAILURE_REASON="remote commit verification mismatch"; exit 1; }
+REMOTE_VERIFIED=true
 vw_perf_stage_end success "$SIZE_BYTES"
 VW_PERF_ARTIFACT_BYTES="$SIZE_BYTES"
 
 FINAL_STATUS="success"; FAILURE_REASON=""
-write_result success "uploaded and remote commit verified"
 SUMMARY="Vaultwarden backup SUCCESS on $(hostname). Container: $CONTAINER. File: $FILENAME. Size: $(vw_format_bytes "$SIZE_BYTES"). GitHub remote commit verified."
 echo "$SUMMARY"
 echo "Manifest: $MANIFEST_FILENAME"
 echo "Finished: $(date '+%F %T %Z')"
 echo "===== Backup finished successfully ====="
-vw_notify success "$SUMMARY"
+vw_notify success "$SUMMARY" || true

@@ -4,6 +4,8 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 export VW_PERF_FILE="$TMP/performance.tsv"
+export VW_PERF_LOCK_FILE="$TMP/performance.lock"
+export PYTHONUTF8=1
 export VW_TEST_MODE_FILE="$TMP/mode"
 export VW_TEST_PROBE_COUNT="$TMP/probes"
 mkdir -p "$TMP/bin"
@@ -38,7 +40,17 @@ case "${1:-}" in
   *) echo "unexpected docker command: $*" >&2; exit 2 ;;
 esac
 FAKEDOCKER
+cat > "$TMP/bin/flock" <<'FAKEFLOCK'
+#!/usr/bin/env bash
+exit 0
+FAKEFLOCK
+cat > "$TMP/bin/python3" <<'FAKEPYTHON'
+#!/usr/bin/env bash
+exec python "$@"
+FAKEPYTHON
 chmod +x "$TMP/bin/docker"
+chmod +x "$TMP/bin/flock"
+chmod +x "$TMP/bin/python3"
 PATH="$TMP/bin:$PATH"
 export PATH
 
