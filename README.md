@@ -2,7 +2,7 @@
 
 # Vaultwarden 1Panel Backup Manager
 
-**交互式备份 · age 加密 · GitHub 异地同步 · 灾难恢复 · systemd 自动运维**
+**交互式备份 · age 加密 · GitHub / WebDAV 异地备份 · 灾难恢复 · systemd 自动运维**
 
 面向 Ubuntu / Debian 上通过 1Panel 应用商店安装的 Vaultwarden（SQLite）
 
@@ -10,7 +10,7 @@
 ![Panel](https://img.shields.io/badge/panel-1Panel-1677ff)
 ![Encryption](https://img.shields.io/badge/encryption-age-16a34a)
 ![Scheduler](https://img.shields.io/badge/scheduler-systemd-6d28d9)
-![Version](https://img.shields.io/badge/version-1.4.6-blue)
+![Version](https://img.shields.io/badge/version-1.4.7-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 </div>
@@ -19,17 +19,36 @@
 
 ## 项目简介
 
-Vaultwarden 将用户密码库保存在自己的服务器上，因此需要可靠的异地备份和可验证的恢复流程。本项目提供一个面向 1Panel 应用商店版 Vaultwarden 的交互式运维管理器，帮助管理员发现正确的 Docker 容器和 `/data` 主机挂载目录，将完整数据目录加密后同步到独立的 GitHub Private 仓库，并在需要时从历史备份恢复。
+Vaultwarden 将用户密码库保存在自己的服务器上，因此需要可靠的异地备份和可验证的恢复流程。本项目提供一个面向 1Panel 应用商店版 Vaultwarden 的交互式运维管理器，帮助管理员发现正确的 Docker 容器和 `/data` 主机挂载目录，将完整数据目录加密后同步到独立的 GitHub Private 仓库或 WebDAV 专用目录，并在需要时从历史备份恢复。
 
 项目重点不是再部署一套 Vaultwarden，而是保护已经由 1Panel 管理的现有实例。1Panel 继续负责应用安装、Docker、域名、HTTPS 证书和反向代理；本项目负责数据备份、校验、通知、历史管理和灾难恢复。
 
-> **源码仓库与备份仓库必须分离。** 本仓库仅放项目代码和文档。另建一个 GitHub Private 仓库保存 `.age` 加密备份。不要把数据库、附件、age 私钥、SSH 私钥、真实配置文件或其他凭据提交到源码仓库。
+> **源码仓库与备份存储必须分离。** 本仓库仅放项目代码和文档。GitHub 备份目标须使用独立 Private 仓库，WebDAV 须使用专用目录。不要把数据库、附件、age 私钥、SSH 私钥、WebDAV 凭据、真实配置或其他秘密提交到源码仓库。
 
 ## 操作确认输入
 
 所有需要输入 `YES` 的风险确认均已统一为大小写不敏感：输入 `yes`、`YES` 或 `Yes` 都可以继续；其他输入均取消。不会因为大小写不同而误取消操作。
 
 ## 功能特点
+
+### v1.4.7 本地备份与 WebDAV
+
+| 菜单 | 操作 |
+|---|---|
+| `[22]` | 查看本地备份大小、文件数量、类型、配套状态及 `.keep` 保护，确认后按组删除 |
+| `[23]` | 验证或恢复本地常规备份与 `pre-restore-*` 恢复前快照 |
+| `[24]` | 配置 WebDAV 专用目录与凭据，选择 systemd 定时备份目标 |
+| `[25]` | 新建完整加密备份并上传 WebDAV，或补传已有本地密文 |
+| `[26]` | 从 WebDAV 列表选择备份，校验、解密并执行带回滚保护的恢复 |
+| `[27]` | 下载 WebDAV 备份并执行 SHA256、age、归档结构与 SQLite 检查 |
+
+WebDAV 支持独立配置。首次向导 `[01]` 可选择 `webdav`，已有 GitHub 配置可直接通过 `[24]` 添加 WebDAV。手动 `[02]` 上传 GitHub，`[25]` 上传 WebDAV。定时任务和升级前备份使用 `BACKUP_TARGET`，旧配置默认 `github`。
+
+WebDAV 使用已有 age 公钥加密完整 `/data` 和部署清单。服务器应支持 `PROPFIND`、`GET`、`PUT`、`MOVE`、`DELETE`，并提供已创建的专用 HTTPS 目录。支持用户名与密码或应用密码，凭据单独保存于 root 所有、权限 `600` 的 `/etc/vaultwarden-webdav.json`。上传先生成临时文件，回读并计算 SHA256 后用 `MOVE` 发布，SHA256 文件最后发布。同名同内容可重复补传，同名不同内容会停止。上传成功要求再次回读核验。
+
+本地默认目录为 `/var/backups/vaultwarden`。`vw-*.tar.gz.age` 是常规数据备份，`pre-restore-*.tar.gz.age` 是恢复前数据快照，`.manifest.json.age` 是加密部署清单，`.sha256` 是对应校验文件。每组通常包含两至四个文件。GitHub 网页删除远端文件后，可用 `[22]` 单独清理本地备份。原有 `[16]` 删除 GitHub 备份成功后，也会清理其匹配的本地文件。
+
+`[22]` 获取备份共用锁、检查保护标记和目录重叠，再要求输入 `yes`。本地恢复与 WebDAV 恢复共用 SQLite 检查、恢复前加密快照、容器停止复查和启动失败回滚。成功的 WebDAV 备份会按 `RETENTION_DAYS` 清理过期本地常规备份；`pre-restore-*` 和 `.keep` 保护文件不会自动删除。WebDAV 远端保留由存储服务管理。
 
 ### 性能监控与执行耗时分析
 
@@ -58,10 +77,10 @@ Vaultwarden 将用户密码库保存在自己的服务器上，因此需要可�
 - **SQLite 检查**：备份停止容器后执行 `PRAGMA quick_check`；恢复必须安装 `sqlite3` 并在覆盖生产数据前再次通过完整性检查。
 - **age 公钥加密**：服务器日常备份只需 age 公钥；age 私钥建议离线保存，不需要长期放在 VPS。
 - **可选本地解密验证**：若 VPS 配置了匹配私钥，仅在 `/dev/shm` 确认为 tmpfs 且空间足够时验证解密归档和 SQLite；否则跳过，不把明文数据目录写入持久磁盘。私钥仍建议离线保存。
-- **SHA256 与远端提交核验**：校验本地文件，并在 GitHub 推送后比较本地与远端分支提交 ID。
+- **SHA256 与远端核验**：校验本地文件，GitHub 推送后比较本地与远端分支提交 ID，WebDAV 上传后回读并比较每个文件的 SHA256。
 - **本次运行结果**：每次运行有独立 ID 和阶段结果文件；锁冲突以退出码 `75` 明确标记跳过。升级前保护只接受本次的本地校验、服务恢复和远端核验成功结果。
-- **空间预检与快照保留**：在数据盘、备份目录、Git 工作目录和临时目录检查可用空间；加密快照完整生成后即保留，后续容器启动、健康探测或 GitHub 失败不会删除密文。
-- **GitHub 推送重试**：遇到临时网络错误时按配置重试；不会使用 `--force` 覆盖远程历史。
+- **空间预检与快照保留**：在数据盘、备份目录、Git 工作目录和临时目录检查可用空间；加密快照完整生成后即保留，后续容器启动、健康探测或远端上传失败不会删除密文。
+- **GitHub 推送重试**：GitHub 遇到临时网络错误时按配置重试；不会使用 `--force` 覆盖远程历史。WebDAV 使用临时文件、禁止覆盖发布和回读校验。
 - **主动健康探测与磁盘阈值**：备份前检查剩余磁盘空间。容器启动后，若 Docker Healthcheck 配置为 Vaultwarden 官方 `/healthcheck.sh`，管理器会在容器内每 2 秒主动执行同一个探针，连续 2 次成功即确认应用就绪，最长等待 120 秒，单次探测另有 12 秒超时保护；不修改 1Panel 管理的 Docker Healthcheck。非标准镜像回退到 Docker 原生状态轮询。
 
 ### 自动化运维（不依赖 1Panel 计划任务）
@@ -70,12 +89,12 @@ Vaultwarden 将用户密码库保存在自己的服务器上，因此需要可�
 - **错过任务补执行**：使用 `Persistent=true`，机器关机错过计划后可在下次启动时补执行。
 - **成功/失败通知**：支持 Telegram、ntfy 或通用 Webhook；通知发送失败不会改变备份结果。
 - **日志轮转**：安装 logrotate 配置，避免备份日志无限增长。
-- **升级前保护**：在 1Panel 更新 Vaultwarden 前，先自动执行一份完整备份并核验 GitHub 远端提交。
+- **升级前保护**：在 1Panel 更新 Vaultwarden 前，先自动执行一份完整备份并核验当前目标远端数据。
 - **诊断报告**：生成脱敏的系统、Docker、数据路径、磁盘、定时器和备份日志报告。
 
 ### 恢复与维护
 
-- **交互式恢复**：从 GitHub 选择历史备份，检查 SHA256、age 私钥匹配、tar 清单和 SQLite 数据库，再进入恢复步骤。
+- **交互式恢复**：从 GitHub、本地目录或 WebDAV 选择历史备份，检查 SHA256、age 私钥匹配、tar 清单和 SQLite 数据库，再进入恢复步骤。
 - **恢复前回滚**：替换生产数据之前，先把当前 `/data` 加密保存为本地回滚快照；失败时尝试自动回滚。
 - **恢复目标保护**：生产数据覆盖及回滚前，按已确认的 `/data` 主机路径重新确认唯一容器并验证已停止；不明状态或容器身份变化时中止。
 - **归档与数据库校验**：解压前拒绝路径穿越、符号/硬链接、特殊文件、重复路径和 setuid/setgid 条目；正式恢复必须通过 SQLite `quick_check`，并预检暂存分区空间。
@@ -95,11 +114,11 @@ Vaultwarden 将用户密码库保存在自己的服务器上，因此需要可�
 | 数据库 | SQLite |
 | 容器数据路径 | 容器内 `/data` 挂载到 VPS 主机目录 |
 | 权限 | root，或可通过 sudo 管理 Docker、systemd 和系统目录 |
-| 远端 | 独立 GitHub Private 备份仓库 |
+| 远端 | 独立 GitHub Private 备份仓库或 WebDAV HTTPS 专用目录 |
 
 **不支持** MySQL/PostgreSQL 外部数据库、容器内非 `/data` 的自定义数据布局、非 systemd Linux 发行版。项目不安装或升级 Docker/1Panel/Vaultwarden，不配置域名、HTTPS 或反向代理，也不会自动执行 Vaultwarden 版本升级。
 
-本项目针对普通个人/小型实例，沿用 GitHub Private 作为异地存储，不包含多 age 密钥、Restic 或 S3 兼容对象存储。单个 GitHub 普通 Git 文件默认限制为 90 MiB。删除当前分支文件不会自动清除 Git 历史对象；需定期关注仓库体积。
+本项目针对普通个人/小型实例，提供 GitHub Private 和 WebDAV 两种独立异地存储目标，不包含多 age 密钥、Restic 或 S3 兼容对象存储。单个 GitHub 普通 Git 文件默认限制为 90 MiB。删除当前分支文件不会自动清除 Git 历史对象；需定期关注仓库体积。
 
 ## 项目结构
 
@@ -120,6 +139,7 @@ Vaultwarden_1Panel_GitHub_Project/
 │   ├── vw-manifest.py               # 生成已脱敏的部署清单
 │   ├── vw-diagnose.sh               # 生成脱敏诊断报告
 │   ├── vw-performance.py            # 性能历史汇总、明细与 CSV 导出
+│   ├── vw-storage.py                # 本地备份分组、删除保护和 WebDAV 传输
 │   ├── vbm-launcher.sh              # 全局 vbm 命令安装模板
 │   └── backup.conf.example          # 配置字段参考
 └── docs/
@@ -165,7 +185,7 @@ sudo bash ./run.sh
 4. 检查并按需安装 `age`、`git`、`openssh-client`、`sqlite3`、`python3`、`logrotate` 等工具。
 5. 创建 GitHub 专用 SSH Deploy Key。将显示的 `.pub` 公钥添加到备份仓库的 **Settings → Deploy keys**，并勾选 **Allow write access**。
 6. 输入现有 age 公钥，或在首次部署时生成一套新的 age 密钥。若你已有历史备份，必须沿用原公钥，不能新生成密钥替代。
-7. 设置本地备份目录、Git 工作目录和保留天数，核对目标容器与数据路径后输入 `yes` 确认（不区分大小写，`yes` / `YES` / `Yes` 均可）。
+7. 设置本地备份目录和保留天数，GitHub 目标另配置 Git 工作目录，核对目标容器与数据路径后输入 `yes` 确认（不区分大小写，`yes` / `YES` / `Yes` 均可）。
 
 age 私钥必须复制到至少两份离线安全位置并验证可读。日常备份只需要公钥，不需要把私钥长期放在 VPS。
 
@@ -217,13 +237,26 @@ tail -n 100 /var/log/vaultwarden-backup.log
 
 菜单按工作流程分组，编号支持输入 `01` 或 `1`（其他两位编号也可以直接输入）：
 
+| 编号 | 操作 |
+|---|---|
+| `22` | 查看或按组删除本地备份 |
+| `23` | 验证或恢复本地备份 |
+| `24` | 配置 WebDAV 及定时备份目标 |
+| `25` | 新建 WebDAV 备份或补传本地密文 |
+| `26` | 从 WebDAV 选择备份并恢复 |
+| `27` | 验证 WebDAV 加密备份 |
+
+菜单 `[23]` 的来源选择在随后的菜单中输入 `2`。`[03]` 和 `[08]` 则可从 GitHub、本地目录或 WebDAV 中选择备份。
+
+菜单 `[23]` 的本地来源在随后的来源菜单中选择。`[03]` 和 `[08]` 也可以从 GitHub 或本地目录选择备份。
+
 ### 01 · 环境管理
 
 | 编号 | 功能 |
 |---|---|
 | 01 | 首次配置 / 重新检测容器与数据目录 |
-| 02 | 立即备份当前数据并推送 GitHub |
-| 03 | 从 GitHub 选择备份并恢复数据 |
+| 02 | 立即备份当前数据并上传当前目标 |
+| 03 | 从 GitHub / 本地选择备份并恢复数据 |
 | 04 | 检查当前环境和备份配置 |
 
 ### 02 · 备份管理
@@ -233,7 +266,7 @@ tail -n 100 /var/log/vaultwarden-backup.log
 | 05 | 查看最近备份日志 |
 | 06 | 查看自动备份定时任务帮助 |
 | 07 | 更新已安装的后台脚本（保留现有配置） |
-| 08 | 验证 GitHub 历史备份（SHA256 / age / SQLite） |
+| 08 | 验证 GitHub / 本地历史备份（SHA256 / age / SQLite） |
 
 ### 03 · 自动化管理
 
@@ -256,7 +289,7 @@ tail -n 100 /var/log/vaultwarden-backup.log
 
 | 编号 | 功能 |
 |---|---|
-| 16 | 历史备份管理（查看 / 永久保留 / 取消保留 / 删除） |
+| 16 | GitHub 历史备份管理（查看 / 永久保留 / 取消保留 / 删除） |
 | 17 | 查看加密部署清单 |
 | 18 | 隔离恢复演练（临时容器启动，不连接生产网络、不修改生产数据） |
 
@@ -286,13 +319,13 @@ tail -n 100 /var/log/vaultwarden-backup.log
 
 ## 备份完整性与恢复演练
 
-备份工作器会检查：容器和 `/data` 匹配、数据库非空、磁盘可用空间、停止后的 SQLite `quick_check`、tar/gzip/age 管道返回值、age 文件头、精确文件大小、SHA256、推送重试，以及 GitHub 远端提交 ID。若 age 私钥只保存在离线介质，自动备份不会声称做过实际解密测试；请定期在管理器菜单 **8** 中临时提供原私钥，实际解密、读取 tar 归档并执行 SQLite 检查；菜单 **18** 会在 `--network none`、不映射端口的临时 Docker 容器中启动已恢复的临时数据，进一步验证 Vaultwarden 进程能否正常启动。
+备份工作器会检查：容器和 `/data` 匹配、数据库非空、磁盘可用空间、停止后的 SQLite `quick_check`、tar/gzip/age 管道返回值、age 文件头、精确文件大小、SHA256、GitHub 推送重试和远端提交 ID，或 WebDAV 上传后的回读 SHA256。若 age 私钥只保存在离线介质，自动备份不会声称做过实际解密测试；请定期在管理器菜单 **8** 中临时提供原私钥，实际解密、读取 tar 归档并执行 SQLite 检查；菜单 **18** 会在 `--network none`、不映射端口的临时 Docker 容器中启动已恢复的临时数据，进一步验证 Vaultwarden 进程能否正常启动。
 
 恢复流程在正式覆盖数据前会先解密到暂存目录、检查数据库，并加密保存当前生产数据为 `pre-restore-*.tar.gz.age` 回滚快照。恢复后会等待容器达到 running/healthy；健康检查失败时会尝试回滚。即使工具报告恢复成功，也必须人工登录原账户检查密码库、附件、TOTP 和客户端同步。确认前不要删除回滚快照。
 
 ## 升级前保护与部署清单
 
-- 在 1Panel 更新 Vaultwarden 前，使用菜单 **14** 创建并验证升级前备份。只有完整备份和 GitHub 远端校验成功，才建议继续升级。
+- 在 1Panel 更新 Vaultwarden 前，使用菜单 **14** 创建并验证升级前备份。只有完整备份和当前目标远端校验成功，才建议继续升级。
 - 本项目不会自动升级 Vaultwarden，升级动作仍由 1Panel 完成。
 - 每次备份会记录一份脱敏部署清单。发生 VPS 损坏时，可用菜单 **17** 选择并解密清单，参考原镜像版本、挂载、端口、网络和非敏感环境设置，在新 VPS 的 1Panel 中手动重建应用。
 - SMTP 密码、Admin Token、Webhook Token 等秘密值不会进入部署清单；必须从你自己的密码管理或安全记录中恢复。
@@ -322,7 +355,7 @@ tail -n 100 /var/log/vaultwarden-backup.log
 
 **VPS 错过 05:20 备份怎么办？** systemd timer 使用 `Persistent=true`，下次开机时会补执行错过的触发时间。可通过 `systemctl list-timers --all` 查看计划。
 
-**GitHub 推送失败怎么办？** 工作器会按配置重试，失败密文保留在本地备份目录。查看 `/var/log/vaultwarden-backup.log`，检查 Deploy Key、网络、远端历史和仓库容量。
+**GitHub 或 WebDAV 上传失败怎么办？** GitHub 工作器会按配置重试，失败密文保留在本地备份目录，可从菜单 `[25]` 重试上传 WebDAV。查看 `/var/log/vaultwarden-backup.log`，检查凭据、网络和远端容量。
 
 **可以只备份 db.sqlite3 吗？** 不建议。附件和 Send 文件位于文件系统中，必须备份整个 `/data`。
 

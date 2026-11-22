@@ -49,7 +49,7 @@ check_root_owned_tree() {
 
 check_root_owned_tree || exit 1
 
-for required in "$MANAGER" "$PROJECT_DIR/scripts/vw-common.sh" "$PROJECT_DIR/scripts/vw-backup.sh" "$PROJECT_DIR/scripts/vw-restore-prepare.sh" "$PROJECT_DIR/scripts/vw-archive-check.py" "$PROJECT_DIR/scripts/vw-manifest.py" "$PROJECT_DIR/scripts/vw-diagnose.sh" "$PROJECT_DIR/scripts/vw-performance.py" "$PROJECT_DIR/scripts/vbm-launcher.sh"; do
+for required in "$MANAGER" "$PROJECT_DIR/scripts/vw-common.sh" "$PROJECT_DIR/scripts/vw-backup.sh" "$PROJECT_DIR/scripts/vw-restore-prepare.sh" "$PROJECT_DIR/scripts/vw-archive-check.py" "$PROJECT_DIR/scripts/vw-manifest.py" "$PROJECT_DIR/scripts/vw-storage.py" "$PROJECT_DIR/scripts/vw-diagnose.sh" "$PROJECT_DIR/scripts/vw-performance.py" "$PROJECT_DIR/scripts/vbm-launcher.sh"; do
   if [[ ! -f "$required" ]]; then
     echo "错误：项目文件不完整，缺少：$required" >&2
     echo "请从 GitHub 下载/克隆完整项目目录，不要只下载 run.sh。" >&2

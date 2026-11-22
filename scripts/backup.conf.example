@@ -10,6 +10,7 @@ BACKUP_DIR="/var/backups/vaultwarden"
 REPO_DIR="/opt/vw-github-repo"
 RETENTION_DAYS="30"
 MAX_FILE_MIB="90"
+BACKUP_TARGET="github"
 AGE_IDENTITY_DEFAULT="/root/vw-age-identity.txt"
 
 # 自动化：每日 VPS 本地时间 05:20；由菜单 9 安装 systemd timer。
@@ -28,3 +29,6 @@ NTFY_TOKEN=""
 WEBHOOK_URL=""
 NOTIFY_ON_SUCCESS="true"
 NOTIFY_ON_FAILURE="true"
+
+# WebDAV credentials are configured separately by menu 24 in /etc/vaultwarden-webdav.json.
+# BACKUP_TARGET accepts github or webdav for scheduled backups.

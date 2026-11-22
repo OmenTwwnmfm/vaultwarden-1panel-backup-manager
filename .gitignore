@@ -1,6 +1,7 @@
 # Real credentials and local configuration
 /etc/vaultwarden-backup.conf
 vaultwarden-backup.conf
+vaultwarden-webdav.json
 *.env
 .env
 

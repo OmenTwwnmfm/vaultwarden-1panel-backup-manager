@@ -5,7 +5,7 @@ set -Eeuo pipefail
 umask 077
 unset VW_CONFIG_FILE VW_LOG_FILE VW_LOCK_FILE VW_STATE_DIR VW_COMMON_LIB VW_MANIFEST_TOOL VW_ARCHIVE_CHECK_TOOL VW_MIN_FREE_MB VW_PERF_FILE VW_PERF_LOCK_FILE VW_DIAG_REPORT_DIR
 
-VERSION="1.4.6"
+VERSION="1.4.7"
 CONFIG_FILE="/etc/vaultwarden-backup.conf"
 BACKUP_SCRIPT="/usr/local/sbin/vw-backup.sh"
 RESTORE_SCRIPT="/usr/local/sbin/vw-restore-prepare.sh"
@@ -21,6 +21,8 @@ else
   printf '[错误] 找不到共享检测库：%s\n' "$COMMON_LIB" >&2
   exit 1
 fi
+STORAGE_TOOL="$SCRIPT_DIR/vw-storage.py"
+[[ -f "$STORAGE_TOOL" ]] || STORAGE_TOOL="/usr/local/libexec/vw-storage.py"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
@@ -83,8 +85,10 @@ require_docker() {
 }
 
 install_dependencies() {
-  local missing=() pkg
-  for cmd in age age-keygen git ssh-keygen ssh-keyscan sha256sum tar gzip flock sqlite3 python3 logrotate timeout; do
+  local target="${1:-github}" missing=()
+  local -a required=(age age-keygen sha256sum tar gzip flock sqlite3 python3 logrotate timeout)
+  if [[ "$target" == github ]]; then required+=(git ssh-keygen ssh-keyscan); fi
+  for cmd in "${required[@]}"; do
     command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
   done
   if ((${#missing[@]} == 0)); then
@@ -95,11 +99,13 @@ install_dependencies() {
     err "缺少工具：${missing[*]}；当前系统没有 apt-get，请手动安装。"
     return 1
   fi
-  warn "需要安装备份工具：age、git、openssh-client、tar、gzip、util-linux 等。不会安装或修改 Docker。"
+  local -a packages=(age coreutils tar gzip util-linux findutils sqlite3 python3 logrotate)
+  if [[ "$target" == github ]]; then packages+=(git openssh-client); fi
+  warn "需要安装备份工具：${packages[*]}。不会安装或修改 Docker。"
   confirm_yes "是否使用 apt 安装缺少的备份工具？" || { warn "已取消。"; return 1; }
   export DEBIAN_FRONTEND=noninteractive
   if ! apt-get update; then err "apt-get update 失败，请检查 VPS 软件源和网络。"; return 1; fi
-  if ! apt-get install -y age git openssh-client coreutils tar gzip util-linux findutils sqlite3 python3 logrotate; then err "依赖安装失败。"; return 1; fi
+  if ! apt-get install -y "${packages[@]}"; then err "依赖安装失败。"; return 1; fi
   ok "备份工具安装完成。"
 }
 
@@ -196,6 +202,10 @@ load_config() {
   WEBHOOK_URL="${WEBHOOK_URL:-}"
   NOTIFY_ON_SUCCESS="${NOTIFY_ON_SUCCESS:-true}"
   NOTIFY_ON_FAILURE="${NOTIFY_ON_FAILURE:-true}"
+  BACKUP_TARGET="${BACKUP_TARGET:-github}"
+  GITHUB_REPO="${GITHUB_REPO:-}"
+  GITHUB_BRANCH="${GITHUB_BRANCH:-main}"
+  GITHUB_SSH_KEY="${GITHUB_SSH_KEY:-/root/.ssh/vw_github_backup}"
 }
 
 make_ssh_command() {
@@ -331,13 +341,18 @@ write_config() {
     printf 'WEBHOOK_URL=%q\n' "${WEBHOOK_URL:-}"
     printf 'NOTIFY_ON_SUCCESS=%q\n' "${NOTIFY_ON_SUCCESS:-true}"
     printf 'NOTIFY_ON_FAILURE=%q\n' "${NOTIFY_ON_FAILURE:-true}"
+    printf 'BACKUP_TARGET=%q\n' "${BACKUP_TARGET:-github}"
   } > "$tmp"
-  install -o root -g root -m 600 "$tmp" "$CONFIG_FILE"
+  local target_tmp
+  target_tmp=$(mktemp "${CONFIG_FILE}.XXXXXX") || { rm -f -- "$tmp"; return 1; }
+  install -o root -g root -m 600 "$tmp" "$target_tmp" || { rm -f -- "$tmp" "$target_tmp"; return 1; }
+  vw_atomic_replace "$target_tmp" "$CONFIG_FILE" || { rm -f -- "$tmp" "$target_tmp"; return 1; }
   rm -f "$tmp"
 }
 
 install_helper_scripts() {
   local source_dir="$SCRIPT_DIR"
+  [[ -f "$source_dir/vw-storage.py" ]] || { err "缺少 vw-storage.py。"; return 1; }
   [[ -f "$source_dir/vw-manager.sh" && -f "$source_dir/vw-common.sh" && -f "$source_dir/vw-backup.sh" && -f "$source_dir/vw-restore-prepare.sh" && -f "$source_dir/vw-archive-check.py" && -f "$source_dir/vw-manifest.py" && -f "$source_dir/vw-diagnose.sh" && -f "$source_dir/vw-performance.py" && -f "$source_dir/vbm-launcher.sh" ]] || {
     err "项目脚本不完整，缺少公共库、备份/恢复或归档检查工具。"
     return 1
@@ -350,6 +365,7 @@ install_helper_scripts() {
   install -o root -g root -m 755 "$source_dir/vw-manifest.py" /usr/local/libexec/vw-manifest.py || return 1
   install -o root -g root -m 700 "$source_dir/vw-diagnose.sh" /usr/local/sbin/vw-diagnose.sh || return 1
   install -o root -g root -m 755 "$source_dir/vw-performance.py" /usr/local/libexec/vw-performance.py || return 1
+  install -o root -g root -m 755 "$source_dir/vw-storage.py" /usr/local/libexec/vw-storage.py || return 1
   install -o root -g root -m 700 "$source_dir/vw-manager.sh" "$MANAGER_SCRIPT" || return 1
   local project_root launcher_tmp
   project_root=$(readlink -f -- "$source_dir/..")
@@ -388,7 +404,7 @@ PYVBM
 
 update_installed_scripts() {
   [[ -f "$CONFIG_FILE" ]] || { err "尚未完成首次配置，请先运行菜单 1。"; return 1; }
-  echo "将更新管理器、备份/恢复/诊断/性能工具、全局 vbm 命令及公共库，不会修改 /etc/vaultwarden-backup.conf、age 公钥、SSH 密钥或 GitHub 仓库。若 systemd timer 已安装，timer 文件会保留。"
+  echo "将更新管理器、备份/恢复/诊断/性能/WebDAV 工具、全局 vbm 命令及公共库，不会修改现有备份配置、age 公钥、SSH 密钥、WebDAV 凭据或远端备份。若 systemd timer 已安装，timer 文件会保留。"
   confirm_yes_upper "确认安装当前项目目录中的新版脚本？" || { warn "已取消。"; return 0; }
   install_helper_scripts || { err "脚本更新失败。"; return 1; }
   ok "更新完成。全局命令 vbm 已安装/更新；下一次备份将自动重新检测 1Panel 当前容器名称及 /data 主机目录。"
@@ -397,24 +413,32 @@ update_installed_scripts() {
 
 configure_wizard() {
   require_docker || return 1
-  install_dependencies || return 1
+  if [[ -f "$CONFIG_FILE" ]]; then load_config || return 1; fi
+  BACKUP_TARGET=$(read_default "自动备份目标（github / webdav）" "${BACKUP_TARGET:-github}")
+  [[ "$BACKUP_TARGET" == github || "$BACKUP_TARGET" == webdav ]] || { err "请选择 github 或 webdav。"; return 1; }
+  install_dependencies "$BACKUP_TARGET" || return 1
   echo
   echo "========== 第 1 步：检测 Vaultwarden 容器 =========="
   list_vaultwarden_containers || return 1
   inspect_data_mount "$DETECTED_CONTAINER" || return 1
 
   echo
-  echo "========== 第 2 步：配置 GitHub 备份仓库 =========="
-  local github_repo branch ssh_key age_recipient identity_default backup_dir repo_dir retention max_mib
+  echo "========== 第 2 步：配置备份目标 =========="
+  local github_repo="${GITHUB_REPO:-}" branch="${GITHUB_BRANCH:-main}" ssh_key="${GITHUB_SSH_KEY:-/root/.ssh/vw_github_backup}" age_recipient identity_default backup_dir repo_dir="${REPO_DIR:-}" retention max_mib
+  if [[ "$BACKUP_TARGET" == github ]]; then
   read -r -p "GitHub 专用 Private 备份仓库 SSH 地址（git@github.com:用户名/vaultwarden-backup.git）: " github_repo
   [[ "$github_repo" =~ ^git@github\.com:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git$ ]] || { err "仓库地址格式不正确。请使用 git@github.com:用户名/仓库名.git"; return 1; }
-  branch=$(read_default "GitHub 分支名" "main")
+  branch=$(read_default "GitHub 分支名" "$branch")
   if ! git check-ref-format --branch "$branch" >/dev/null 2>&1; then
     err "Git 分支名不合法：$branch"
     return 1
   fi
-  ssh_key=$(read_default "GitHub SSH 私钥路径" "/root/.ssh/vw_github_backup")
+  ssh_key=$(read_default "GitHub SSH 私钥路径" "$ssh_key")
+  repo_dir=$(read_default "GitHub 本地仓库目录" "${repo_dir:-/opt/vw-github-repo}")
   setup_github_ssh "$ssh_key" || return 1
+  else
+    configure_webdav initial || return 1
+  fi
 
   echo
   echo "========== 第 3 步：配置 age 加密公钥 =========="
@@ -451,17 +475,18 @@ configure_wizard() {
 
   echo
   echo "========== 第 4 步：设置本地目录与保留策略 =========="
-  backup_dir=$(read_default "本地加密备份目录" "/var/backups/vaultwarden")
-  repo_dir=$(read_default "GitHub 本地仓库目录" "/opt/vw-github-repo")
-  retention=$(read_default "本地/仓库当前文件保留天数" "30")
-  max_mib=$(read_default "单个 GitHub 文件大小上限 MiB（建议不超过 90）" "90")
+  backup_dir=$(read_default "本地加密备份目录" "${BACKUP_DIR:-/var/backups/vaultwarden}")
+  retention=$(read_default "本地备份文件保留天数（WebDAV 由服务端管理远端保留）" "${RETENTION_DAYS:-30}")
+  max_mib=$(read_default "GitHub 单文件大小上限 MiB" "${MAX_FILE_MIB:-90}")
   [[ "$retention" =~ ^[0-9]+$ ]] && ((retention >= 1)) || { err "保留天数必须是正整数。"; return 1; }
   [[ "$max_mib" =~ ^[0-9]+$ ]] && ((max_mib >= 1 && max_mib <= 95)) || { err "文件限制必须为 1 到 95 MiB。"; return 1; }
   local data_canon backup_canon repo_canon
   data_canon=$(readlink -f -- "$DETECTED_DATA_DIR")
   backup_canon=$(readlink -m -- "$backup_dir")
-  repo_canon=$(readlink -m -- "$repo_dir")
-  for candidate_dir in "$backup_canon" "$repo_canon"; do
+  if [[ "$BACKUP_TARGET" == github ]]; then repo_canon=$(readlink -m -- "$repo_dir"); fi
+  local -a candidate_dirs=("$backup_canon")
+  if [[ "$BACKUP_TARGET" == github ]]; then candidate_dirs+=("$repo_canon"); fi
+  for candidate_dir in "${candidate_dirs[@]}"; do
     case "$candidate_dir" in
       /|/var|/var/lib|/var/lib/docker|/opt|/root|/home|/etc|/usr)
         err "备份目录或 Git 工作目录过于宽泛：$candidate_dir。请选择专用子目录。"
@@ -469,25 +494,30 @@ configure_wizard() {
         ;;
     esac
   done
-  if paths_overlap "$data_canon" "$backup_canon" || paths_overlap "$data_canon" "$repo_canon"; then
+  if paths_overlap "$data_canon" "$backup_canon" || { [[ "$BACKUP_TARGET" == github ]] && paths_overlap "$data_canon" "$repo_canon"; }; then
     err "本地备份目录/Git 工作目录不能与 Vaultwarden 数据目录相同、互相嵌套或覆盖。请重新选择独立目录。"
     return 1
   fi
-  if paths_overlap "$backup_canon" "$repo_canon"; then
+  if [[ "$BACKUP_TARGET" == github ]] && paths_overlap "$backup_canon" "$repo_canon"; then
     err "本地加密备份目录和 Git 工作目录必须相互独立。请重新选择目录。"
     return 1
   fi
 
   echo
   echo "========== 配置摘要 =========="
-  printf '容器名称：%s\n镜像：%s\n容器状态：%s\n主机数据目录：%s\nage 公钥：%s\nGitHub 仓库：%s\n分支：%s\nSSH 私钥：%s\n本地备份目录：%s\nGit 工作目录：%s\n保留天数：%s\n' \
-    "$DETECTED_CONTAINER" "$DETECTED_IMAGE" "$DETECTED_STATUS" "$DETECTED_DATA_DIR" "$age_recipient" "$github_repo" "$branch" "$ssh_key" "$backup_dir" "$repo_dir" "$retention"
+  printf '容器名称：%s\n镜像：%s\n容器状态：%s\n主机数据目录：%s\n备份目标：%s\nage 公钥：%s\n本地备份目录：%s\n保留天数：%s\n' \
+    "$DETECTED_CONTAINER" "$DETECTED_IMAGE" "$DETECTED_STATUS" "$DETECTED_DATA_DIR" "$BACKUP_TARGET" "$age_recipient" "$backup_dir" "$retention"
+  if [[ "$BACKUP_TARGET" == github ]]; then
+    printf 'GitHub 仓库：%s\n分支：%s\nSSH 私钥：%s\nGit 工作目录：%s\n' "$github_repo" "$branch" "$ssh_key" "$repo_dir"
+  fi
   confirm_yes_upper "请确认上述容器和数据目录都是正确的。脚本后续只会操作所显示的 Vaultwarden 容器与 /data 数据目录。" || { warn "已取消。"; return 1; }
 
-  write_config "$DETECTED_CONTAINER" "$DETECTED_DATA_DIR" "$age_recipient" "$github_repo" "$branch" "$ssh_key" "$backup_dir" "$repo_dir" "$retention" "$max_mib" "$identity_default"
+  write_config "$DETECTED_CONTAINER" "$DETECTED_DATA_DIR" "$age_recipient" "$github_repo" "$branch" "$ssh_key" "$backup_dir" "$repo_dir" "$retention" "$max_mib" "$identity_default" || return 1
   mkdir -p "$backup_dir"
   chmod 700 "$backup_dir"
-  init_or_clone_backup_repo "$github_repo" "$branch" "$repo_dir" "$ssh_key" || return 1
+  if [[ "$BACKUP_TARGET" == github ]]; then
+    init_or_clone_backup_repo "$github_repo" "$branch" "$repo_dir" "$ssh_key" || return 1
+  fi
 
   install_helper_scripts || { err "后台脚本安装失败。"; return 1; }
   ok "配置已保存至 $CONFIG_FILE（权限 600），后台脚本已安装。"
@@ -497,7 +527,7 @@ configure_wizard() {
     echo "请确认离线副本至少两份且已验证可读；确认后建议从 VPS 删除这份私钥。"
     echo "将来恢复时，再把离线私钥临时复制到服务器，并在菜单 3 中填写路径。"
   fi
-  warn "下一步先选择「立即备份并推送」完成测试，然后选择菜单 9 安装 systemd 自动备份（默认每天 05:20，不依赖 1Panel 计划任务）。"
+  warn "请先用 GitHub 菜单 [02] 或 WebDAV 菜单 [25] 完成备份测试，再用 [09] 安装自动备份。当前定时目标为 $BACKUP_TARGET。"
   pause
 }
 
@@ -514,24 +544,35 @@ check_configuration() {
     warn "检测到 1Panel 可能重建过容器，正在更新记录。"
     CONTAINER="$VW_DETECTED_CONTAINER"
     DATA_DIR="$VW_DETECTED_DATA_DIR"
-    write_config "$CONTAINER" "$DATA_DIR" "$AGE_RECIPIENT" "$GITHUB_REPO" "$GITHUB_BRANCH" "$GITHUB_SSH_KEY" "$BACKUP_DIR" "$REPO_DIR" "$RETENTION_DAYS" "$MAX_FILE_MIB" "${AGE_IDENTITY_DEFAULT:-/root/vw-age-identity.txt}"
+    write_config "$CONTAINER" "$DATA_DIR" "$AGE_RECIPIENT" "$GITHUB_REPO" "$GITHUB_BRANCH" "$GITHUB_SSH_KEY" "$BACKUP_DIR" "${REPO_DIR:-}" "$RETENTION_DAYS" "$MAX_FILE_MIB" "${AGE_IDENTITY_DEFAULT:-/root/vw-age-identity.txt}"
   fi
   printf '当前容器：%s\n镜像：%s\n状态：%s\n/data 主机目录：%s\n' \
     "$VW_DETECTED_CONTAINER" "$VW_DETECTED_IMAGE" "$VW_DETECTED_STATUS" "$VW_DETECTED_DATA_DIR"
   [[ -s "$DATA_DIR/db.sqlite3" ]] || { err "db.sqlite3 不存在或大小为 0。"; return 1; }
   [[ "$AGE_RECIPIENT" == age1* ]] || { err "age 公钥格式错误。"; return 1; }
-  [[ -f "$GITHUB_SSH_KEY" ]] || { err "SSH 私钥不存在：$GITHUB_SSH_KEY"; return 1; }
+  if [[ "$BACKUP_TARGET" == github ]]; then
+    [[ -f "$GITHUB_SSH_KEY" ]] || { err "SSH 私钥不存在：$GITHUB_SSH_KEY"; return 1; }
+  fi
   printf '数据库大小：%s\n' "$(du -h "$DATA_DIR/db.sqlite3" | awk '{print $1}')"
   printf '整个 /data 大小：%s\n' "$(du -sh "$DATA_DIR" | awk '{print $1}')"
   printf '数据目录剩余磁盘：%s\n' "$(df -h "$DATA_DIR" | awk 'NR==2 {print $4}')"
   ok "本地数据路径及容器检查通过。"
+  if [[ "$BACKUP_TARGET" == webdav ]]; then
+    python3 "$STORAGE_TOOL" list > /dev/null || return 1
+    python3 "$STORAGE_TOOL" prune-local "$BACKUP_DIR" "$RETENTION_DAYS" || return 1
+    ok "WebDAV 目录读取连接正常。"
+    pause
+    return 0
+  fi
   make_ssh_command "$GITHUB_SSH_KEY"
   if git ls-remote "$GITHUB_REPO" HEAD >/dev/null; then ok "GitHub SSH 仓库读取连接正常。"; else err "GitHub 仓库连接失败，请检查 Deploy Key 与仓库地址。"; return 1; fi
   pause
 }
 
 run_backup_now() {
+  local target="${1:-}"
   load_config || return 1
+  target="${target:-$BACKUP_TARGET}"
   # Interactive/manual backup should execute the worker from the currently
   # checked-out project, not a possibly stale copy installed by an older menu
   # release. systemd continues to use /usr/local/sbin/vw-backup.sh, which is
@@ -541,7 +582,7 @@ run_backup_now() {
   [[ -f "$SCRIPT_DIR/vw-common.sh" ]] && common_lib="$SCRIPT_DIR/vw-common.sh"
   [[ -f "$SCRIPT_DIR/vw-manifest.py" ]] && manifest_tool="$SCRIPT_DIR/vw-manifest.py"
   [[ -f "$worker" ]] || { err "找不到备份脚本：$worker。请先运行菜单 07 更新后台脚本。"; return 1; }
-  echo "将执行：自动重新检测当前 Vaultwarden 容器与 /data 挂载 → 停止服务 → 完整备份并加密 → 启动服务 → 推送 GitHub。"
+  echo "将检测容器、停止服务、完整备份并加密、启动服务并上传到 $target。"
   echo "上次记录容器：$CONTAINER"
   echo "上次记录数据目录：$DATA_DIR"
   echo "本次手动备份脚本：$worker"
@@ -549,7 +590,7 @@ run_backup_now() {
   echo "如果 1Panel 重建过容器，后台脚本会优先按原数据目录重新匹配，并将新容器名写回配置。"
   if ! confirm_yes_upper "此操作会使 Vaultwarden 短暂不可用。确认立即备份？"; then warn "已取消。"; return 0; fi
   local rc=0
-  if VW_COMMON_LIB="$common_lib" VW_MANIFEST_TOOL="$manifest_tool" VW_PERF_FILE="/var/lib/vaultwarden-backup/performance.tsv" bash "$worker"; then rc=0; else rc=$?; fi
+  if VW_COMMON_LIB="$common_lib" VW_MANIFEST_TOOL="$manifest_tool" VW_PERF_FILE="/var/lib/vaultwarden-backup/performance.tsv" bash "$worker" "$target"; then rc=0; else rc=$?; fi
   if ((rc == 0)); then
     ok "备份脚本执行完成。"
   elif ((rc == 75)); then
@@ -568,7 +609,165 @@ clone_for_restore() {
   git clone --quiet --branch "$branch" "$url" "$dest"
 }
 
+choose_backup_name() {
+  local listing="$1" prompt="${2:-请选择备份编号（0 取消）}" choice index
+  local -a names=()
+  mapfile -t names < "$listing"
+  ((${#names[@]} > 0)) || { err "没有找到备份及配套 SHA256 文件。"; return 1; }
+  for index in "${!names[@]}"; do
+    printf '  %d) %s\n' "$((index + 1))" "${names[$index]}"
+  done
+  choice=$(read_default "$prompt" "0")
+  [[ "$choice" == 0 ]] && return 1
+  [[ "$choice" =~ ^[1-9][0-9]{0,5}$ ]] && ((choice <= ${#names[@]})) || { err "编号无效。"; return 1; }
+  SELECTED_NAME="${names[$((choice - 1))]}"
+}
+
+select_source_archive() {
+  local source="$1" temp_root="$2" repo_tmp="$2/repository" key listing="$2/archives.txt"
+  case "$source" in
+    choose)
+      source=$(read_default "备份来源（1 GitHub / 2 本地目录 / 3 WebDAV）" "1")
+      case "$source" in
+        1) source=github ;;
+        2) source=local ;;
+        3) source=webdav ;;
+        *) err "来源无效。"; return 1 ;;
+      esac
+      select_source_archive "$source" "$temp_root"
+      return $?
+      ;;
+    github)
+      [[ -n "$GITHUB_REPO" ]] || { err "请先配置 GitHub 仓库。"; return 1; }
+      vw_require_free_space "$temp_root" "$((MIN_FREE_MB * 1024 * 1024))" "恢复下载临时目录" || return 1
+      key=$(read_default "GitHub SSH 私钥路径" "$GITHUB_SSH_KEY")
+      [[ -f "$key" ]] || { err "SSH 私钥不存在：$key"; return 1; }
+      clone_for_restore "$GITHUB_REPO" "$GITHUB_BRANCH" "$repo_tmp" "$key" || { err "克隆 GitHub 备份仓库失败。"; return 1; }
+      python3 "$STORAGE_TOOL" local-list "$repo_tmp" --archives > "$listing" || return 1
+      choose_backup_name "$listing" || return 1
+      SELECTED_ARCHIVE="$repo_tmp/$SELECTED_NAME"
+      ;;
+    local|local-fixed)
+      local source_listing="$temp_root/local-archives.txt"
+      python3 "$STORAGE_TOOL" local-list "$BACKUP_DIR" --archives > "$source_listing" || return 1
+      if [[ "$source" == local-fixed ]]; then
+        choose_backup_name "$source_listing" "本地备份编号（0 取消）" || return 1
+      else
+        choose_backup_name "$source_listing" || return 1
+      fi
+      SELECTED_ARCHIVE="$BACKUP_DIR/$SELECTED_NAME"
+      ;;
+    webdav)
+      vw_require_free_space "$temp_root" "$((MIN_FREE_MB * 1024 * 1024))" "WebDAV 下载临时目录" || return 1
+      python3 "$STORAGE_TOOL" list > "$listing" || return 1
+      choose_backup_name "$listing" || return 1
+      python3 "$STORAGE_TOOL" download "$SELECTED_NAME" "$repo_tmp" --min-free-mb "${MIN_FREE_MB:-512}" || return 1
+      SELECTED_ARCHIVE="$repo_tmp/$SELECTED_NAME"
+      ;;
+    *) err "备份来源无效。"; return 1 ;;
+  esac
+  python3 "$STORAGE_TOOL" verify "$SELECTED_ARCHIVE" || return 1
+}
+
+manage_local_backups() (
+  load_config || return 1
+  local temp_root="" listing choice index name bytes count kind protection state
+  trap '[[ -z "$temp_root" ]] || rm -rf -- "$temp_root"' EXIT
+  mkdir -p /run/lock
+  exec 8>"/run/lock/vaultwarden-backup.lock"
+  flock -n 8 || { err "另一个备份、恢复或清理操作正在运行。"; return 1; }
+  [[ -d "$BACKUP_DIR" ]] || { err "本地备份目录不存在：$BACKUP_DIR"; return 1; }
+  temp_root=$(mktemp -d /var/tmp/vw-local-list.XXXXXX)
+  listing="$temp_root/inventory.tsv"
+  python3 "$STORAGE_TOOL" local-list "$BACKUP_DIR" > "$listing" || return 1
+  local -a rows=()
+  mapfile -t rows < "$listing"
+  echo "本地备份目录 $BACKUP_DIR"
+  ((${#rows[@]} > 0)) || { info "目录中没有可识别的备份文件。"; pause; return 0; }
+  for index in "${!rows[@]}"; do
+    IFS=$'\t' read -r name bytes count kind protection state <<< "${rows[$index]}"
+    printf '  %d) %s\n     %s | %s | %s 个文件 | %s | %s\n' "$((index + 1))" "$name" "$kind" "$(vw_format_bytes "$bytes")" "$count" "$protection" "$state"
+  done
+  echo "删除范围为所选本地密文、SHA256 和配套部署清单。"
+  choice=$(read_default "输入要删除的备份组编号（0 返回）" "0")
+  [[ "$choice" == 0 ]] && return 0
+  [[ "$choice" =~ ^[1-9][0-9]{0,5}$ ]] && ((choice <= ${#rows[@]})) || { err "编号无效。"; return 1; }
+  IFS=$'\t' read -r name bytes count kind protection state <<< "${rows[$((choice - 1))]}"
+  [[ "$protection" != 已保护 ]] || { err "备份已被 .keep 保护。"; return 1; }
+  warn "将删除本地备份 $name，共 $(vw_format_bytes "$bytes")。"
+  confirm_yes_upper "确认删除这组本地备份？" || return 0
+  python3 "$STORAGE_TOOL" local-delete "$BACKUP_DIR" "$name" --data-dir "$DATA_DIR" --repo-dir "${REPO_DIR:-}" || return 1
+  pause
+)
+
+local_backup_actions() {
+  local action
+  action=$(read_default "本地备份操作（1 验证 / 2 恢复 / 0 返回）" "0")
+  case "$action" in
+    1) verify_github_backup local-fixed ;;
+    2) restore_from_github local-fixed ;;
+    0) return 0 ;;
+    *) err "选项无效。"; return 1 ;;
+  esac
+}
+
+configure_webdav() (
+  mkdir -p /run/lock
+  exec 8>"/run/lock/vaultwarden-backup.lock"
+  flock -n 8 || { err "另一个备份、恢复或清理操作正在运行。"; return 1; }
+  local url username webdav_secret
+  echo "请输入已创建的 WebDAV 专用备份目录完整 HTTPS 地址。"
+  url=$(read_default "WebDAV 目录 URL" "")
+  username=$(read_default "WebDAV 用户名" "")
+  read -r -s -p "WebDAV 密码或应用密码（隐藏输入）: " webdav_secret || return 1
+  echo
+  printf '%s\0%s\0%s\0' "$url" "$username" "$webdav_secret" | python3 "$STORAGE_TOOL" configure || return 1
+  unset webdav_secret
+  ok "WebDAV 凭据已保存至 /etc/vaultwarden-webdav.json，权限为 600。"
+  if [[ "${1:-}" != initial && -f "$CONFIG_FILE" ]]; then
+    load_config || return 1
+    if [[ -n "$BACKUP_TARGET" && "$BACKUP_TARGET" != webdav ]]; then
+      err "WebDAV 配置已保存，但不修改当前定时目标 $BACKUP_TARGET。需要切换时请再次选择菜单 24。"
+      pause
+      return 0
+    fi
+    local target
+    target=$(read_default "定时备份目标（github / webdav）" "$BACKUP_TARGET")
+    [[ "$target" == github || "$target" == webdav ]] || { err "目标无效。"; return 1; }
+    [[ "$target" != github || -n "$GITHUB_REPO" ]] || { err "请先配置 GitHub 仓库。"; return 1; }
+    BACKUP_TARGET="$target"
+    vw_save_config || return 1
+    ok "定时备份目标已设为 $BACKUP_TARGET。"
+  fi
+)
+
+upload_local_webdav() (
+  load_config || return 1
+  local temp_root=""
+  trap '[[ -z "$temp_root" ]] || rm -rf -- "$temp_root"' EXIT
+  mkdir -p /run/lock
+  exec 8>"/run/lock/vaultwarden-backup.lock"
+  flock -n 8 || { err "另一个备份、恢复或清理操作正在运行。"; return 1; }
+  temp_root=$(mktemp -d /var/tmp/vw-webdav-upload.XXXXXX)
+  select_source_archive local-fixed "$temp_root" || return 1
+  confirm_yes "确认将 $(basename "$SELECTED_ARCHIVE") 上传到 WebDAV？" || return 0
+  python3 "$STORAGE_TOOL" upload "$SELECTED_ARCHIVE" || return 1
+  pause
+)
+
+webdav_upload_menu() {
+  local action
+  action=$(read_default "WebDAV 上传（1 新建加密备份并上传 / 2 上传已有本地备份 / 0 返回）" "0")
+  case "$action" in
+    1) run_backup_now webdav ;;
+    2) upload_local_webdav ;;
+    0) return 0 ;;
+    *) err "选项无效。"; return 1 ;;
+  esac
+}
+
 restore_from_github() (
+  local source="${1:-choose}"
   # Run restore in a subshell so decrypted staging data is removed even if the
   # user interrupts the operation or an unexpected command fails.
   local temp_root="" staging="" container="" stopped_by_script=0 data_change_started=0
@@ -616,47 +815,25 @@ restore_from_github() (
   require_docker || return 1
   load_config || return 1
   [[ -x "$RESTORE_SCRIPT" ]] || { err "恢复准备脚本尚未安装，请先运行菜单 1。"; return 1; }
-  local repo_tmp identity archive choice container_state data_dir rollback_archive timestamp restore_ssh_key identity_pub start_choice
+  local identity archive container_state data_dir rollback_archive timestamp identity_pub start_choice
   mkdir -p /run/lock
   exec 8>"/run/lock/vaultwarden-backup.lock"
   if ! flock -n 8; then
     err "检测到另一个备份/恢复操作正在运行。请等它结束后再试。"
     return 1
   fi
-  temp_root=$(mktemp -d /var/tmp/vw-github-restore.XXXXXX)
+  temp_root=$(mktemp -d "/var/tmp/vw-${source}-restore.XXXXXX")
   chmod 700 "$temp_root"
-  repo_tmp="$temp_root/repository"
   vw_require_free_space "$temp_root" "$((MIN_FREE_MB * 1024 * 1024))" "恢复下载临时目录" || { err "临时目录剩余空间不足，恢复已停止。"; rm -rf -- "$temp_root"; return 1; }
   timestamp=$(date '+%Y%m%d-%H%M%S')
   local run_id="${timestamp}-$$"
   vw_perf_init restore "$run_id"
-  vw_perf_stage_begin "github_clone_and_list"
-
-  echo "========== 第 1 步：从 GitHub 获取备份列表 =========="
-  restore_ssh_key=$(read_default "读取 GitHub 私有仓库的 SSH 私钥路径" "$GITHUB_SSH_KEY")
-  [[ -f "$restore_ssh_key" ]] || { err "SSH 私钥不存在：$restore_ssh_key"; rm -rf -- "$temp_root"; return 1; }
-  info "正在读取 GitHub 备份仓库，不会修改远端内容。"
-  if ! clone_for_restore "$GITHUB_REPO" "$GITHUB_BRANCH" "$repo_tmp" "$restore_ssh_key"; then
-    err "克隆 GitHub 仓库失败。确认仓库中已有备份、Deploy Key 有读取权限。"
-    rm -rf -- "$temp_root"
-    return 1
-  fi
-  vw_require_free_space "$temp_root" "$((MIN_FREE_MB * 1024 * 1024))" "恢复下载临时目录" || { err "临时目录剩余空间不足，恢复已停止。"; rm -rf -- "$temp_root"; return 1; }
+  local acquisition_stage="$source"
+  [[ "$source" == choose ]] && acquisition_stage=backup
+  vw_perf_stage_begin "${acquisition_stage}_acquire_backup"
+  select_source_archive "$source" "$temp_root" || return 1
+  archive="$SELECTED_ARCHIVE"
   vw_perf_stage_end success
-
-  local -a archives=()
-  mapfile -t archives < <(find "$repo_tmp" -maxdepth 1 -type f -name 'vw-*.tar.gz.age' -printf '%f\n' | sort -r)
-  if ((${#archives[@]} == 0)); then err "仓库当前分支没有找到 vw-*.tar.gz.age 备份文件。"; rm -rf -- "$temp_root"; return 1; fi
-  echo "可恢复的备份（按时间从新到旧）："
-  local i
-  for i in "${!archives[@]}"; do printf '  %d) %s (%s)\n' "$((i+1))" "${archives[$i]}" "$(du -h "$repo_tmp/${archives[$i]}" | awk '{print $1}')"; done
-  vw_perf_user_wait_begin
-  read -r -p "请输入要恢复的备份编号: " choice
-  vw_perf_user_wait_end
-  if [[ ! "$choice" =~ ^[0-9]+$ ]] || ((choice < 1 || choice > ${#archives[@]})); then
-    err "编号无效。"; rm -rf -- "$temp_root"; return 1
-  fi
-  archive="$repo_tmp/${archives[$((choice-1))]}"
   if [[ ! -f "$archive.sha256" ]]; then err "找不到对应 SHA256 文件：$archive.sha256"; rm -rf -- "$temp_root"; return 1; fi
 
   echo
@@ -727,7 +904,7 @@ restore_from_github() (
   printf '选中的备份：%s\n目标容器：%s\n当前容器状态：%s\n将恢复到的数据目录：%s\n当前数据加密留存到：%s\n' \
     "$(basename "$archive")" "$container" "$container_state" "$data_dir" "$rollback_archive"
   warn "恢复会替换 /data 目录内的全部内容。为兼容 Docker 命名卷，不会移动挂载点本身；脚本会先用 age 公钥把当前数据加密保存到本地回滚文件。"
-  if ! confirm_yes_upper "请再次核对容器和路径。确认将所选 GitHub 备份恢复到该 Vaultwarden 实例？"; then
+  if ! confirm_yes_upper "请再次核对容器和路径。确认将所选备份恢复到该 Vaultwarden 实例？"; then
     warn "已取消。暂存解密数据将被清理，原数据保持不变。"
     return 0
   fi
@@ -950,7 +1127,8 @@ restore_from_github() (
 )
 
 verify_github_backup() (
-  local temp_root="" repo_tmp="" restore_ssh_key="" identity="" identity_pub="" choice="" archive="" staging="" sqlite_result=""
+  local source="${1:-choose}"
+  local temp_root="" identity="" identity_pub="" archive="" staging="" sqlite_result=""
   cleanup_verify() {
     [[ -n "${temp_root:-}" ]] && rm -rf -- "$temp_root"
     [[ -n "${staging:-}" ]] && rm -rf -- "$staging"
@@ -961,28 +1139,17 @@ verify_github_backup() (
   load_config || return 1
   [[ -x "$RESTORE_SCRIPT" ]] || { err "恢复准备脚本尚未安装，请先运行菜单 1 或菜单 7 更新脚本。"; return 1; }
   command -v sqlite3 >/dev/null 2>&1 || { err "恢复验证需要 sqlite3 执行数据库完整性检查。请先安装依赖。"; return 1; }
-  temp_root=$(mktemp -d /var/tmp/vw-verify.XXXXXX)
+  mkdir -p /run/lock
+  exec 8>"/run/lock/vaultwarden-backup.lock"
+  flock -n 8 || { err "另一个备份、恢复或清理操作正在运行。"; return 1; }
+  temp_root=$(mktemp -d "/var/tmp/vw-${source}-verify.XXXXXX")
   chmod 700 "$temp_root"
-  repo_tmp="$temp_root/repository"
-  restore_ssh_key=$(read_default "GitHub SSH 私钥路径" "$GITHUB_SSH_KEY")
-  [[ -f "$restore_ssh_key" ]] || { err "找不到 GitHub SSH 私钥：$restore_ssh_key"; return 1; }
-  echo "正在从 GitHub 读取备份列表..."
-  clone_for_restore "$GITHUB_REPO" "$GITHUB_BRANCH" "$repo_tmp" "$restore_ssh_key" || { err "无法克隆备份仓库。"; return 1; }
-  local -a archives=()
-  mapfile -t archives < <(find "$repo_tmp" -maxdepth 1 -type f -name 'vw-*.tar.gz.age' -printf '%f\n' | sort -r)
-  ((${#archives[@]} > 0)) || { err "GitHub 仓库中没有发现 vw-*.tar.gz.age。"; return 1; }
-  echo "可验证备份（按时间从新到旧）："
-  local i
-  for i in "${!archives[@]}"; do
-    printf '  %d) %s (%s)\n' "$((i+1))" "${archives[$i]}" "$(stat -c '%s bytes' "$repo_tmp/${archives[$i]}")"
-  done
-  read -r -p "请输入要验证的备份编号: " choice
-  [[ "$choice" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= ${#archives[@]})) || { err "编号无效。"; return 1; }
-  archive="$repo_tmp/${archives[$((choice-1))]}"
+  select_source_archive "$source" "$temp_root" || return 1
+  archive="$SELECTED_ARCHIVE"
   [[ -s "$archive" && -s "$archive.sha256" ]] || { err "备份文件或 SHA256 文件不存在/为空。"; return 1; }
   echo
   echo "第 1 项：SHA256 校验"
-  (cd "$repo_tmp" && sha256sum -c "$(basename "$archive").sha256") || { err "SHA256 校验失败。"; return 1; }
+  python3 "$STORAGE_TOOL" verify "$archive" || return 1
   echo
   echo "第 2 项：验证 age 私钥"
   identity=$(read_default "原 age 私钥文件路径（必须与此备份匹配）" "${AGE_IDENTITY_DEFAULT:-/root/vw-age-identity.txt}")
@@ -1020,8 +1187,7 @@ verify_github_backup() (
 
 restore_rehearsal() (
   set -Eeuo pipefail
-  local temp_root="" repo_tmp="" identity="" restore_ssh_key="" archive="" staging="" container="" image="" test_name="" choice="" state="" health="" i
-  local -a archives=()
+  local temp_root="" identity="" archive="" staging="" container="" image="" test_name="" state="" health=""
   cleanup_rehearsal() {
     if [[ -n "${test_name:-}" ]] && docker inspect "$test_name" >/dev/null 2>&1; then
       docker rm -f "$test_name" >/dev/null 2>&1 || true
@@ -1036,7 +1202,6 @@ restore_rehearsal() (
   require_docker || return 1
   load_config || return 1
   [[ -x "$RESTORE_SCRIPT" ]] || { err "恢复准备脚本未安装，请先运行菜单 7。"; return 1; }
-  local -a container_candidates=()
   if ! vw_find_target "$CONTAINER" "$DATA_DIR" true; then
     err "无法确认生产 Vaultwarden 容器和 /data 路径。恢复演练停止。"
     return 1
@@ -1045,18 +1210,9 @@ restore_rehearsal() (
   container="$VW_DETECTED_CONTAINER"
   docker image inspect "$image" >/dev/null 2>&1 || { err "当前镜像在本机不存在：$image。请先在 1Panel 正常更新/拉取后再演练。"; return 1; }
   temp_root=$(mktemp -d /var/tmp/vw-drill.XXXXXX); chmod 700 "$temp_root"
-  repo_tmp="$temp_root/repository"
-  restore_ssh_key=$(read_default "GitHub SSH 私钥路径" "$GITHUB_SSH_KEY")
-  [[ -f "$restore_ssh_key" ]] || { err "找不到 GitHub SSH 私钥：$restore_ssh_key"; return 1; }
-  echo "正在读取 GitHub 历史备份..."
-  clone_for_restore "$GITHUB_REPO" "$GITHUB_BRANCH" "$repo_tmp" "$restore_ssh_key" || { err "无法克隆备份仓库。"; return 1; }
-  mapfile -t archives < <(find "$repo_tmp" -maxdepth 1 -type f -name 'vw-*.tar.gz.age' -printf '%f\n' | sort -r)
-  ((${#archives[@]} > 0)) || { err "仓库中没有找到加密数据备份。"; return 1; }
-  echo "可进行隔离容器启动测试的备份："
-  for i in "${!archives[@]}"; do printf '  %2d) %s (%s)\n' "$((i+1))" "${archives[$i]}" "$(stat -c '%s bytes' "$repo_tmp/${archives[$i]}")"; done
-  read -r -p "选择备份编号: " choice
-  [[ "$choice" =~ ^[0-9]+$ ]] && ((choice>=1 && choice<=${#archives[@]})) || { err "编号无效。"; return 1; }
-  archive="$repo_tmp/${archives[$((choice-1))]}"
+  vw_require_free_space "$temp_root" "$((MIN_FREE_MB * 1024 * 1024))" "恢复演练下载目录" || return 1
+  select_source_archive choose "$temp_root" || return 1
+  archive="$SELECTED_ARCHIVE"
   identity=$(read_default "原 age 私钥文件路径" "${AGE_IDENTITY_DEFAULT:-/root/vw-age-identity.txt}")
   [[ -f "$identity" ]] || { err "找不到原 age 私钥。"; return 1; }
   local pub
@@ -1236,7 +1392,7 @@ configure_notifications() {
 
 preupgrade_backup() {
   load_config || return 1
-  echo "升级前保护：先运行一次完整备份。只有备份脚本返回成功且远端提交校验通过，才建议继续在 1Panel 更新 Vaultwarden。"
+  echo "升级前保护将创建完整备份并上传至 $BACKUP_TARGET，本次备份通过远端核验后可继续更新 Vaultwarden。"
   confirm_yes_upper "确认现在创建升级前备份？" || return 0
   local worker="$BACKUP_SCRIPT" common_lib="$COMMON_LIB" manifest_tool="/usr/local/libexec/vw-manifest.py" run_id result_file rc=0
   [[ -f "$SCRIPT_DIR/vw-backup.sh" ]] && worker="$SCRIPT_DIR/vw-backup.sh"
@@ -1245,12 +1401,13 @@ preupgrade_backup() {
   run_id="$(date '+%Y%m%d-%H%M%S')-$$"
   result_file="/var/lib/vaultwarden-backup/runs/$run_id.env"
   echo "本次备份运行 ID：$run_id"
-  if VW_RUN_ID="$run_id" VW_COMMON_LIB="$common_lib" VW_MANIFEST_TOOL="$manifest_tool" bash "$worker"; then rc=0; else rc=$?; fi
+  if VW_RUN_ID="$run_id" VW_COMMON_LIB="$common_lib" VW_MANIFEST_TOOL="$manifest_tool" bash "$worker" "$BACKUP_TARGET"; then rc=0; else rc=$?; fi
   if (( rc == 0 )) && [[ -f "$result_file" ]] \
     && grep -Fxq 'STATUS=success' "$result_file" \
     && grep -Fxq "RUN_ID=$run_id" "$result_file" \
     && grep -Fxq 'LOCAL_VERIFIED=true' "$result_file" \
     && grep -Fxq 'SERVICE_RESTORED=true' "$result_file" \
+    && grep -Fxq "BACKUP_TARGET=$BACKUP_TARGET" "$result_file" \
     && grep -Fxq 'REMOTE_VERIFIED=true' "$result_file"; then
     ok "升级前备份成功。现在可以进入 1Panel → 已安装应用 → Vaultwarden 执行更新。"
     warn "本工具不会自动升级 Vaultwarden；升级后可再次运行菜单 4 检查新容器名称，并观察下一次备份。"
@@ -1258,7 +1415,7 @@ preupgrade_backup() {
     if [[ -f "$result_file" ]] && grep -Fxq 'STATUS=skipped' "$result_file"; then
       err "本次升级前备份因另一个操作占用锁而跳过；不会允许继续升级。"
     else
-      err "本次升级前备份未能完成本地验证、服务恢复和 GitHub 远端核验。请勿继续更新 Vaultwarden。"
+      err "本次升级前备份未能完成本地校验、服务恢复和 $BACKUP_TARGET 远端核验。请勿继续更新 Vaultwarden。"
     fi
     return 1
   fi
@@ -1269,10 +1426,10 @@ configure_backup_policy() {
   load_config || return 1
   local retention max_mib min_free retries delay
   echo "========== 备份策略 =========="
-  retention=$(read_default "本地及 Git 当前分支文件保留天数（Git 历史仍会保留旧对象）" "${RETENTION_DAYS:-30}")
+  retention=$(read_default "本地备份文件保留天数（GitHub 当前分支文件也会清理，Git 历史仍会保留旧对象）" "${RETENTION_DAYS:-30}")
   max_mib=$(read_default "单个加密备份文件最大 MiB（建议不超过 90）" "${MAX_FILE_MIB:-90}")
   min_free=$(read_default "数据盘最少可用空间 MB；不足则跳过备份" "${MIN_FREE_MB:-512}")
-  retries=$(read_default "GitHub 推送失败重试次数（1-10）" "${GIT_PUSH_RETRIES:-3}")
+  retries=$(read_default "GitHub 推送失败重试次数（1-10，WebDAV 不使用）" "${GIT_PUSH_RETRIES:-3}")
   delay=$(read_default "每次重试基础等待秒数" "${GIT_RETRY_DELAY:-15}")
   [[ "$retention" =~ ^[0-9]+$ ]] && ((retention >= 1 && retention <= 3650)) || { err "保留天数必须为 1-3650。"; return 1; }
   [[ "$max_mib" =~ ^[0-9]+$ ]] && ((max_mib >= 1 && max_mib <= 95)) || { err "文件限制必须为 1-95 MiB。"; return 1; }
@@ -1430,7 +1587,7 @@ performance_monitor() {
   [[ -f "$tool" ]] || { err "找不到性能分析工具，请从项目目录运行菜单 07 更新脚本。"; pause; return 1; }
   if [[ ! -f "$perf_file" ]]; then
     warn "尚未找到性能记录文件：$perf_file"
-    echo "v1.4.6 已记录主动健康探测、人工输入等待和服务停机窗口。"
+    echo "v1.4.7 已加入本地备份管理和 WebDAV。"
     echo "systemd 自动备份使用系统安装版 worker；更新项目后请先执行菜单 07 同步后台脚本。"
     echo "完成一次成功或失败的手动备份/恢复后，再返回此处查看性能记录。"
     pause
@@ -1581,14 +1738,14 @@ sep()
 sections = [
     ("01 · 环境管理", [
         "[01] 首次配置 / 重新检测容器与数据目录",
-        "[02] 立即备份当前数据并推送 GitHub",
-        "[03] 从 GitHub 选择备份并恢复数据",
+        "[02] 立即备份当前数据并上传当前目标",
+        "[03] 从 GitHub / 本地选择备份并恢复数据",
         "[04] 检查当前环境和备份配置"]),
     ("02 · 备份管理", [
         "[05] 查看最近备份日志",
         "[06] 查看自动备份定时任务帮助",
         "[07] 更新已安装的后台脚本（保留现有配置）",
-        "[08] 验证 GitHub 历史备份（SHA256 / age / SQLite）"]),
+        "[08] 验证 GitHub / 本地历史备份（SHA256 / age / SQLite）"]),
     ("03 · 自动化管理", [
         "[09] 安装 systemd 自动备份 / 修改执行时间",
         "[10] 查看 systemd 定时任务状态",
@@ -1605,9 +1762,17 @@ sections = [
     ("06 · 策略设置", [
         "[19] 配置备份策略（保留天数 / 磁盘阈值 / 推送重试）"]),
     ("07 · 性能监控", [
-        "[20] 性能监控与执行耗时分析（备份 / 恢复 / GitHub / 校验）"]),
+        "[20] 性能监控与执行耗时分析（备份 / 恢复 / GitHub / WebDAV）"]),
     ("08 · 项目维护", [
         "[21] 检查 / 更新项目源码"]),
+    ("09 · 本地备份", [
+        "[22] 查看 / 删除本地备份（含恢复前快照）",
+        "[23] 验证 / 恢复本地备份"]),
+    ("10 · WebDAV", [
+        "[24] 配置 WebDAV / 选择定时备份目标",
+        "[25] 加密备份上传 WebDAV / 补传本地备份",
+        "[26] 从 WebDAV 选择备份并恢复",
+        "[27] 验证 WebDAV 备份（SHA256 / age / SQLite）"]),
 ]
 for title, items in sections:
     row(title)
@@ -1630,16 +1795,16 @@ main_menu() {
   while true; do
     clear 2>/dev/null || true
     render_main_menu
-    read -r -p "请选择操作 [00-21]: " choice || exit 0
+    read -r -p "请选择操作 [00-27]: " choice || exit 0
     case "$choice" in
       1|01) configure_wizard || pause ;;
       2|02) run_backup_now || true ;;
-      3|03) restore_from_github || pause ;;
+      3|03) restore_from_github choose || pause ;;
       4|04) check_configuration || pause ;;
       5|05) show_logs ;;
       6|06) show_schedule_help ;;
       7|07) update_installed_scripts || pause ;;
-      8|08) verify_github_backup || pause ;;
+      8|08) verify_github_backup choose || pause ;;
       9|09) install_systemd_timer || pause ;;
       10) systemd_timer_status ;;
       11) pause_systemd_timer || pause ;;
@@ -1647,14 +1812,20 @@ main_menu() {
       13) configure_notifications || pause ;;
       14) preupgrade_backup || pause ;;
       15) generate_diagnostics || pause ;;
-      16) manage_history || pause ;;
+      16) if [[ "$BACKUP_TARGET" == github ]]; then manage_history || pause; else err "历史备份管理目前仅适用于 GitHub 目标。"; pause; fi ;;
       17) view_deployment_manifest || pause ;;
       18) restore_rehearsal || pause ;;
       19) configure_backup_policy || pause ;;
       20) performance_monitor ;;
       21) check_for_project_updates; pause ;;
+      22) manage_local_backups || pause ;;
+      23) local_backup_actions || pause ;;
+      24) configure_webdav || true; pause ;;
+      25) webdav_upload_menu || pause ;;
+      26) restore_from_github webdav || pause ;;
+      27) verify_github_backup webdav || pause ;;
       0|00) echo "已退出。"; exit 0 ;;
-      *) warn "无效选项，请输入 00-21。"; sleep 1 ;;
+      *) warn "无效选项，请输入 00-27。"; sleep 1 ;;
     esac
   done
 }

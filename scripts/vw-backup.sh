@@ -8,6 +8,8 @@ LOG_FILE="${VW_LOG_FILE:-/var/log/vaultwarden-backup.log}"
 LOCK_FILE="${VW_LOCK_FILE:-/run/lock/vaultwarden-backup.lock}"
 COMMON_LIB="${VW_COMMON_LIB:-/usr/local/libexec/vw-common.sh}"
 MANIFEST_TOOL="${VW_MANIFEST_TOOL:-/usr/local/libexec/vw-manifest.py}"
+STORAGE_TOOL="$(dirname -- "${BASH_SOURCE[0]}")/vw-storage.py"
+[[ -f "$STORAGE_TOOL" ]] || STORAGE_TOOL="/usr/local/libexec/vw-storage.py"
 STATE_DIR="${VW_STATE_DIR:-/var/lib/vaultwarden-backup}"
 mkdir -p "$(dirname "$LOG_FILE")" "$(dirname "$LOCK_FILE")" "$STATE_DIR"
 touch "$LOG_FILE"; chmod 600 "$LOG_FILE"; chmod 700 "$STATE_DIR"
@@ -57,6 +59,7 @@ write_result() {
     printf 'DECRYPT_VERIFIED=%q\n' "$DECRYPT_VERIFIED"
     printf 'SERVICE_RESTORED=%q\n' "$SERVICE_RESTORED"
     printf 'REMOTE_VERIFIED=%q\n' "$REMOTE_VERIFIED"
+    printf 'BACKUP_TARGET=%q\n' "${UPLOAD_TARGET:-${BACKUP_TARGET:-github}}"
     printf 'REASON=%q\n' "$reason"
   } > "$tmp"
   chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
@@ -95,14 +98,25 @@ GIT_RETRY_DELAY="${GIT_RETRY_DELAY:-15}"
 NOTIFY_METHOD="${NOTIFY_METHOD:-none}"
 NOTIFY_ON_SUCCESS="${NOTIFY_ON_SUCCESS:-true}"
 NOTIFY_ON_FAILURE="${NOTIFY_ON_FAILURE:-true}"
+BACKUP_TARGET="${BACKUP_TARGET:-github}"
+UPLOAD_TARGET="${1:-$BACKUP_TARGET}"
+[[ "$UPLOAD_TARGET" == github || "$UPLOAD_TARGET" == webdav ]] || { echo "ERROR: Backup target must be github or webdav."; exit 2; }
+REPO_DIR="${REPO_DIR:-/opt/vw-github-repo}"
+MAX_FILE_MIB="${MAX_FILE_MIB:-90}"
 
-required_vars=(CONTAINER DATA_DIR AGE_RECIPIENT GITHUB_REPO GITHUB_BRANCH GITHUB_SSH_KEY BACKUP_DIR REPO_DIR RETENTION_DAYS MAX_FILE_MIB)
+required_vars=(CONTAINER DATA_DIR AGE_RECIPIENT BACKUP_DIR RETENTION_DAYS)
+if [[ "$UPLOAD_TARGET" == github ]]; then required_vars+=(GITHUB_REPO GITHUB_BRANCH GITHUB_SSH_KEY REPO_DIR); fi
 for var in "${required_vars[@]}"; do [[ -n "${!var:-}" ]] || { echo "ERROR: Config value $var is empty."; exit 1; }; done
-for cmd in docker age git sha256sum stat readlink find cp flock date tar gzip awk head du df python3 sqlite3 timeout; do
+for cmd in docker age sha256sum stat readlink find cp flock date tar gzip awk head du df python3 sqlite3 timeout; do
   command -v "$cmd" >/dev/null 2>&1 || { echo "ERROR: Required command missing: $cmd"; exit 1; }
 done
 [[ -f "$MANIFEST_TOOL" ]] || { echo "ERROR: Missing deployment manifest tool: $MANIFEST_TOOL"; exit 1; }
-[[ -f "$GITHUB_SSH_KEY" ]] || { echo "ERROR: GitHub SSH private key not found: $GITHUB_SSH_KEY"; exit 1; }
+if [[ "$UPLOAD_TARGET" == github ]]; then
+  command -v git >/dev/null 2>&1 || { echo "ERROR: Required command missing: git"; exit 1; }
+  [[ -f "$GITHUB_SSH_KEY" ]] || { echo "ERROR: GitHub SSH private key not found: $GITHUB_SSH_KEY"; exit 1; }
+else
+  python3 "$STORAGE_TOOL" list > /dev/null || { echo "ERROR: WebDAV preflight failed; no container stop or local snapshot was started."; exit 1; }
+fi
 [[ "$AGE_RECIPIENT" =~ ^age1[[:alnum:]]+$ ]] || { echo "ERROR: AGE_RECIPIENT is not a valid age public-key-shaped value."; exit 1; }
 [[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]] && (( RETENTION_DAYS >= 1 )) || { echo "ERROR: RETENTION_DAYS must be positive."; exit 1; }
 [[ "$MAX_FILE_MIB" =~ ^[0-9]+$ ]] && (( MAX_FILE_MIB >= 1 && MAX_FILE_MIB <= 95 )) || { echo "ERROR: MAX_FILE_MIB must be 1..95."; exit 1; }
@@ -189,7 +203,7 @@ on_exit() {
     write_result failed "$FAILURE_REASON" || echo "ERROR: Could not write final run result."
     vw_notify failure "Vaultwarden backup FAILED on $(hostname): $FAILURE_REASON. See /var/log/vaultwarden-backup.log." || true
   elif [[ "${FINAL_STATUS:-failed}" == success ]]; then
-    write_result success "uploaded and remote commit verified" || echo "ERROR: Could not write final run result."
+    write_result success "uploaded and $UPLOAD_TARGET remote verified" || echo "ERROR: Could not write final run result."
   fi
   echo "===== Backup finished with exit code $rc ====="
   exit "$rc"
@@ -224,10 +238,16 @@ if [[ -n "$UNSUPPORTED_ENTRY" ]]; then
   exit 1
 fi
 
-DATA_CANON=$(readlink -f -- "$DATA_DIR"); BACKUP_CANON=$(readlink -m -- "$BACKUP_DIR"); REPO_CANON=$(readlink -m -- "$REPO_DIR")
+DATA_CANON=$(readlink -f -- "$DATA_DIR"); BACKUP_CANON=$(readlink -m -- "$BACKUP_DIR")
 paths_overlap() { local a="$1" b="$2"; [[ "$a" == "$b" || "$a" == "$b/"* || "$b" == "$a/"* ]]; }
-if paths_overlap "$DATA_CANON" "$BACKUP_CANON" || paths_overlap "$DATA_CANON" "$REPO_CANON" || paths_overlap "$BACKUP_CANON" "$REPO_CANON"; then
-  FAILURE_REASON="DATA_DIR, BACKUP_DIR and REPO_DIR overlap"; echo "ERROR: $FAILURE_REASON"; exit 1
+if paths_overlap "$DATA_CANON" "$BACKUP_CANON"; then
+  FAILURE_REASON="DATA_DIR and BACKUP_DIR overlap"; echo "ERROR: $FAILURE_REASON"; exit 1
+fi
+if [[ "$UPLOAD_TARGET" == github ]]; then
+  REPO_CANON=$(readlink -m -- "$REPO_DIR")
+  if paths_overlap "$DATA_CANON" "$REPO_CANON" || paths_overlap "$BACKUP_CANON" "$REPO_CANON"; then
+    FAILURE_REASON="DATA_DIR, BACKUP_DIR and REPO_DIR overlap"; echo "ERROR: $FAILURE_REASON"; exit 1
+  fi
 fi
 MIN_FREE_BYTES=$((MIN_FREE_MB * 1024 * 1024))
 SOURCE_BYTES=$(du -sb "$DATA_DIR" | awk '{print $1}')
@@ -235,15 +255,19 @@ DB_BYTES=$(stat -c '%s' "$DATA_DIR/db.sqlite3")
 echo "Source /data size: $(vw_format_bytes "$SOURCE_BYTES")"
 echo "SQLite db.sqlite3: $(vw_format_bytes "$DB_BYTES")"
 
-mkdir -p "$BACKUP_DIR" "$REPO_DIR"; chmod 700 "$BACKUP_DIR" "$REPO_DIR"
+mkdir -p "$BACKUP_DIR"; chmod 700 "$BACKUP_DIR"
+if [[ "$UPLOAD_TARGET" == github ]]; then mkdir -p "$REPO_DIR"; chmod 700 "$REPO_DIR"; fi
 vw_require_free_space "$DATA_DIR" "$MIN_FREE_BYTES" "数据盘" || { FAILURE_REASON="insufficient free space on DATA_DIR filesystem"; exit 1; }
 BACKUP_REQUIRED_BYTES=$(( SOURCE_BYTES + SOURCE_BYTES / 5 ))
 if (( BACKUP_REQUIRED_BYTES < MIN_FREE_BYTES )); then BACKUP_REQUIRED_BYTES="$MIN_FREE_BYTES"; fi
 vw_require_free_space "$BACKUP_DIR" "$BACKUP_REQUIRED_BYTES" "本地备份目录" || { FAILURE_REASON="insufficient free space on BACKUP_DIR filesystem"; exit 1; }
-vw_require_free_space "$REPO_DIR" "$BACKUP_REQUIRED_BYTES" "Git 仓库目录" || { FAILURE_REASON="insufficient free space on REPO_DIR filesystem"; exit 1; }
+if [[ "$UPLOAD_TARGET" == github ]]; then
+  vw_require_free_space "$REPO_DIR" "$BACKUP_REQUIRED_BYTES" "Git 仓库目录" || { FAILURE_REASON="insufficient free space on REPO_DIR filesystem"; exit 1; }
+fi
 vw_require_free_space /var/tmp "$MIN_FREE_BYTES" "临时目录" || { FAILURE_REASON="insufficient free space on temporary filesystem"; exit 1; }
 AVAILABLE_BYTES=$(df -PB1 -- "$BACKUP_DIR" | awk 'NR==2 {print $4}')
 echo "Available backup disk: $(vw_format_bytes "$AVAILABLE_BYTES")"
+if [[ "$UPLOAD_TARGET" == github ]]; then
 [[ -d "$REPO_DIR/.git" ]] || { FAILURE_REASON="Git backup worktree is not initialized"; echo "ERROR: Run setup/configuration first."; exit 1; }
 existing_url=$(git -C "$REPO_DIR" remote get-url origin 2>/dev/null || true)
 [[ "$existing_url" == "$GITHUB_REPO" ]] || { FAILURE_REASON="Git origin differs from configured repository"; echo "ERROR: Configured=$GITHUB_REPO Existing=${existing_url:-<none>}"; exit 1; }
@@ -251,6 +275,7 @@ git -C "$REPO_DIR" config user.name "Vaultwarden Backup"
 git -C "$REPO_DIR" config user.email "vaultwarden-backup@localhost"
 printf -v GIT_SSH_COMMAND 'ssh -i %q -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/root/.ssh/known_hosts' "$GITHUB_SSH_KEY"
 export GIT_SSH_COMMAND
+fi
 
 vw_perf_stage_end success
 vw_perf_stage_begin "manifest_generation"
@@ -312,10 +337,10 @@ SERVICE_RESTORED=true
 vw_perf_downtime_end success
 vw_perf_stage_begin "local_validation_manifest_checksum"
 
-echo "Vaultwarden is running; continuing offline validation and GitHub upload."
+echo "Vaultwarden is running; continuing offline validation and $UPLOAD_TARGET upload."
 MAX_BYTES=$((MAX_FILE_MIB * 1024 * 1024))
 echo "Encrypted backup size: $(vw_format_bytes "$SIZE_BYTES")"
-if (( SIZE_BYTES > MAX_BYTES )); then
+if [[ "$UPLOAD_TARGET" == github ]] && (( SIZE_BYTES > MAX_BYTES )); then
   FAILURE_REASON="backup exceeds GitHub file size limit (${MAX_FILE_MIB} MiB); encrypted file and SHA256 retained locally at $OUTPUT"
   echo "ERROR: $FAILURE_REASON"
   exit 1
@@ -344,7 +369,6 @@ if [[ -n "${AGE_IDENTITY_DEFAULT:-}" && -f "$AGE_IDENTITY_DEFAULT" ]]; then
     else
       echo "INFO: /dev/shm is not tmpfs or lacks enough free space; optional decrypt validation skipped to avoid writing plaintext to persistent storage."
     fi
-    DECRYPT_VERIFIED=true
   else
     echo "WARNING: AGE_IDENTITY_DEFAULT does not match AGE_RECIPIENT; decrypt validation skipped."
   fi
@@ -364,6 +388,18 @@ MANIFEST_COMPLETE=true
 LOCAL_VERIFIED=true
 MANIFEST_VERIFIED=true
 vw_perf_stage_end success "$SIZE_BYTES"
+if [[ "$UPLOAD_TARGET" == webdav ]]; then
+  vw_perf_stage_begin "webdav_upload_readback_verify"
+  if ! python3 "$STORAGE_TOOL" upload "$OUTPUT"; then
+    FAILURE_REASON="WebDAV upload or readback verification failed; local encrypted backup retained"
+    exit 1
+  fi
+  REMOTE_VERIFIED=true
+  vw_perf_stage_end success "$SIZE_BYTES"
+  if ! python3 "$STORAGE_TOOL" prune-local "$BACKUP_DIR" "$RETENTION_DAYS"; then
+    echo "WARNING: WebDAV backup verified, but local retention cleanup did not complete."
+  fi
+else
 vw_perf_stage_begin "github_sync_retention_push_verify"
 
 # Refresh the checked-out branch before pruning so recently-added permanent
@@ -449,10 +485,11 @@ REMOTE_COMMIT=$(git -C "$REPO_DIR" ls-remote origin "refs/heads/$GITHUB_BRANCH" 
 [[ -n "$REMOTE_COMMIT" && "$LOCAL_COMMIT" == "$REMOTE_COMMIT" ]] || { FAILURE_REASON="remote commit verification mismatch"; exit 1; }
 REMOTE_VERIFIED=true
 vw_perf_stage_end success "$SIZE_BYTES"
+fi
 VW_PERF_ARTIFACT_BYTES="$SIZE_BYTES"
 
 FINAL_STATUS="success"; FAILURE_REASON=""
-SUMMARY="Vaultwarden backup SUCCESS on $(hostname). Container: $CONTAINER. File: $FILENAME. Size: $(vw_format_bytes "$SIZE_BYTES"). GitHub remote commit verified."
+SUMMARY="Vaultwarden backup SUCCESS on $(hostname). Container: $CONTAINER. File: $FILENAME. Size: $(vw_format_bytes "$SIZE_BYTES"). $UPLOAD_TARGET remote verified."
 echo "$SUMMARY"
 echo "Manifest: $MANIFEST_FILENAME"
 echo "Finished: $(date '+%F %T %Z')"

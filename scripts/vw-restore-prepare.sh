@@ -15,6 +15,8 @@ IDENTITY=$(readlink -f -- "$2")
 STAGING="$3"
 ARCHIVE_CHECK_TOOL="${VW_ARCHIVE_CHECK_TOOL:-$(dirname -- "${BASH_SOURCE[0]}")/vw-archive-check.py}"
 [[ -f "$ARCHIVE_CHECK_TOOL" ]] || ARCHIVE_CHECK_TOOL="/usr/local/libexec/vw-archive-check.py"
+STORAGE_TOOL="$(dirname -- "${BASH_SOURCE[0]}")/vw-storage.py"
+[[ -f "$STORAGE_TOOL" ]] || STORAGE_TOOL="/usr/local/libexec/vw-storage.py"
 
 [[ -f "$ARCHIVE" ]] || { echo "错误：找不到备份文件：$ARCHIVE" >&2; exit 1; }
 [[ -f "$IDENTITY" ]] || { echo "错误：找不到 age 私钥文件：$IDENTITY" >&2; exit 1; }
@@ -27,7 +29,7 @@ command -v sqlite3 >/dev/null 2>&1 || { echo "错误：恢复前必须安装 sql
 CHECKSUM="${ARCHIVE}.sha256"
 if [[ -f "$CHECKSUM" ]]; then
   echo "正在校验 SHA256..."
-  (cd "$(dirname "$ARCHIVE")" && sha256sum -c "$(basename "$CHECKSUM")")
+  python3 "$STORAGE_TOOL" verify "$ARCHIVE"
 else
   echo "错误：找不到配套 SHA256 文件：$CHECKSUM" >&2
   echo "为避免恢复不完整或被替换的文件，本脚本要求备份文件和 .sha256 同时存在。" >&2

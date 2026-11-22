@@ -30,4 +30,5 @@ jobs:
       - name: Run Python tests
         run: |
           python -B tests/test-archive-check.py
+          python -B tests/test-storage.py
           python -B -m compileall -q scripts tests
