@@ -122,7 +122,6 @@ grep -Fq '本地校验：通过 · 服务恢复：通过 · 远端核验：未�
 require_root() { return 0; }
 require_tty() { return 0; }
 clear() { printf 'clear\n' >> "$TMP/events"; }
-render_main_menu() { printf 'menu\n' >> "$TMP/events"; }
 restore_rehearsal() {
   printf 'result\n' >> "$TMP/events"
   return "$rehearsal_status"
@@ -132,7 +131,7 @@ warn() { printf 'unexpected input\n' >> "$TMP/events"; }
 for rehearsal_status in 0 1; do
   : > "$TMP/events"
   (VBM_SKIP_UPDATE_CHECK=1 main_menu) <<< $'09\n\n00' >/dev/null
-  [[ "$(cat "$TMP/events")" == $'clear\nmenu\nresult\npause\nclear\nmenu' ]]
+  [[ "$(cat "$TMP/events")" == $'clear\nresult\npause\nclear' ]]
 done
 
 echo 'PASS: WebDAV deletes by group index and rehearsal pauses once before clearing the result'
