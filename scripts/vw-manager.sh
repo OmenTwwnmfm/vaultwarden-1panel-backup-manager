@@ -5,7 +5,7 @@ set -Eeuo pipefail
 umask 077
 unset VW_CONFIG_FILE VW_LOG_FILE VW_LOCK_FILE VW_STATE_DIR VW_COMMON_LIB VW_MANIFEST_TOOL VW_ARCHIVE_CHECK_TOOL VW_MIN_FREE_MB VW_PERF_FILE VW_PERF_LOCK_FILE VW_DIAG_REPORT_DIR
 
-VERSION="1.4.7"
+VERSION="1.4.8"
 CONFIG_FILE="/etc/vaultwarden-backup.conf"
 BACKUP_SCRIPT="/usr/local/sbin/vw-backup.sh"
 RESTORE_SCRIPT="/usr/local/sbin/vw-restore-prepare.sh"
@@ -602,6 +602,14 @@ run_backup_now() {
   return "$rc"
 }
 
+manual_backup_menu() {
+  load_config || return 1
+  local target
+  target=$(read_default "立即备份目标（github / webdav）" "${BACKUP_TARGET:-github}")
+  [[ "$target" == github || "$target" == webdav ]] || { err "备份目标仅支持 github 或 webdav。"; return 1; }
+  run_backup_now "$target"
+}
+
 clone_for_restore() {
   local url="$1" branch="$2" dest="$3" key="$4"
   make_ssh_command "$key"
@@ -638,6 +646,7 @@ select_source_archive() {
       return $?
       ;;
     github)
+      SELECTED_SOURCE=github
       [[ -n "$GITHUB_REPO" ]] || { err "请先配置 GitHub 仓库。"; return 1; }
       vw_require_free_space "$temp_root" "$((MIN_FREE_MB * 1024 * 1024))" "恢复下载临时目录" || return 1
       key=$(read_default "GitHub SSH 私钥路径" "$GITHUB_SSH_KEY")
@@ -648,6 +657,7 @@ select_source_archive() {
       SELECTED_ARCHIVE="$repo_tmp/$SELECTED_NAME"
       ;;
     local|local-fixed)
+      SELECTED_SOURCE=local
       local source_listing="$temp_root/local-archives.txt"
       python3 "$STORAGE_TOOL" local-list "$BACKUP_DIR" --archives > "$source_listing" || return 1
       if [[ "$source" == local-fixed ]]; then
@@ -658,6 +668,7 @@ select_source_archive() {
       SELECTED_ARCHIVE="$BACKUP_DIR/$SELECTED_NAME"
       ;;
     webdav)
+      SELECTED_SOURCE=webdav
       vw_require_free_space "$temp_root" "$((MIN_FREE_MB * 1024 * 1024))" "WebDAV 下载临时目录" || return 1
       python3 "$STORAGE_TOOL" list > "$listing" || return 1
       choose_backup_name "$listing" || return 1
@@ -699,6 +710,35 @@ manage_local_backups() (
   python3 "$STORAGE_TOOL" local-delete "$BACKUP_DIR" "$name" --data-dir "$DATA_DIR" --repo-dir "${REPO_DIR:-}" || return 1
   pause
 )
+
+manage_backup_history() {
+  load_config || return 1
+  local source
+  source=$(read_default "历史备份来源（1 GitHub / 2 本地 / 3 WebDAV）" "1")
+  case "$source" in
+    1)
+      [[ -n "$GITHUB_REPO" ]] || { err "尚未配置 GitHub。"; return 1; }
+      manage_history
+      ;;
+    2) manage_local_backups ;;
+    3)
+      local action name
+      mapfile -t remote_archives < <(python3 "$STORAGE_TOOL" list)
+      ((${#remote_archives[@]} > 0)) || { info "WebDAV vbm 目录中没有备份。"; pause; return 0; }
+      echo "WebDAV vbm 目录中的备份："
+      printf '  %s\n' "${remote_archives[@]}"
+      action=$(read_default "WebDAV 操作（1 查看列表 / 2 删除备份 / 0 返回）" "1")
+      if [[ "$action" == 2 ]]; then
+        name=$(read_default "输入要删除的备份文件名" "")
+        confirm_yes_upper "确认从 WebDAV vbm 目录删除 $name 及其配套文件？" || return 0
+        python3 "$STORAGE_TOOL" remote-delete "$name" || return 1
+        ok "WebDAV 备份组已删除。"
+      fi
+      pause
+      ;;
+    *) err "来源无效。"; return 1 ;;
+  esac
+}
 
 local_backup_actions() {
   local action
@@ -1247,8 +1287,12 @@ restore_rehearsal() (
 install_systemd_timer() {
   load_config || return 1
   command -v systemctl >/dev/null 2>&1 || { err "当前系统没有 systemctl，无法使用 systemd timer。"; return 1; }
-  local hhmm frequency calendar default_hhmm
+  local hhmm frequency calendar default_hhmm target
   echo "可选备份频率：daily（每天）、weekly（每周日）、monthly（每月 1 日）。"
+  target=$(read_default "定时备份目标（github / webdav）" "${BACKUP_TARGET:-github}")
+  [[ "$target" == github || "$target" == webdav ]] || { err "备份目标仅支持 github 或 webdav。"; return 1; }
+  if [[ "$target" == webdav ]]; then python3 "$STORAGE_TOOL" list >/dev/null || return 1; fi
+  BACKUP_TARGET="$target"
   frequency=$(read_default "备份频率 daily/weekly/monthly" "${BACKUP_FREQUENCY:-daily}")
   frequency="${frequency,,}"
   [[ "$frequency" == daily || "$frequency" == weekly || "$frequency" == monthly ]] || { err "频率仅支持 daily、weekly 或 monthly。"; return 1; }
@@ -1269,7 +1313,7 @@ install_systemd_timer() {
   vw_save_config || { err "保存配置失败。"; return 1; }
   cat > /etc/systemd/system/vw-backup.service <<'UNIT'
 [Unit]
-Description=Scheduled Vaultwarden encrypted backup to GitHub
+Description=Scheduled Vaultwarden encrypted backup to ${BACKUP_TARGET}
 Wants=network-online.target
 After=network-online.target docker.service
 Requires=docker.service
@@ -1551,24 +1595,20 @@ manage_history() (
 view_deployment_manifest() (
   set -Eeuo pipefail
   load_config || return 1
-  local temp repo_tmp identity choice file
-  local -a manifests=()
+  local temp identity archive file
   temp=$(mktemp -d /var/tmp/vw-manifest.XXXXXX); chmod 700 "$temp"
   trap 'rm -rf -- "$temp"' EXIT
-  repo_tmp="$temp/repo"
-  make_ssh_command "$GITHUB_SSH_KEY"
-  git clone --quiet --branch "$GITHUB_BRANCH" "$GITHUB_REPO" "$repo_tmp" || { err "无法读取备份仓库。"; return 1; }
-  mapfile -t manifests < <(find "$repo_tmp" -maxdepth 1 -type f -name 'vw-*.manifest.json.age' -printf '%f\n' | sort -r)
-  ((${#manifests[@]} > 0)) || { warn "没有找到部署清单。请先运行一次新版备份。"; return 0; }
-  local i
-  for i in "${!manifests[@]}"; do printf '  %d) %s\n' "$((i+1))" "${manifests[$i]}"; done
-  read -r -p "选择清单编号: " choice
-  [[ "$choice" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= ${#manifests[@]})) || { err "编号无效。"; return 1; }
-  file="${manifests[$((choice-1))]}"
+  select_source_archive choose "$temp" || return 1
+  archive="$SELECTED_ARCHIVE"
+  file="${archive%.tar.gz.age}.manifest.json.age"
+  if [[ ! -f "$file" && "$SELECTED_SOURCE" == webdav ]]; then
+    python3 "$STORAGE_TOOL" download-manifest "$SELECTED_NAME" "$(dirname -- "$archive")" || return 1
+  fi
+  [[ -f "$file" ]] || { err "所选备份没有配套加密部署清单。"; return 1; }
   identity=$(read_default "原 age 私钥文件路径" "${AGE_IDENTITY_DEFAULT:-/root/vw-age-identity.txt}")
   [[ -f "$identity" ]] || { err "找不到 age 私钥。"; return 1; }
-  (cd "$repo_tmp" && sha256sum -c "$file.sha256") || { err "部署清单 SHA256 校验失败。"; return 1; }
-  age -d -i "$identity" "$repo_tmp/$file" > "$temp/manifest.json" || { err "部署清单解密失败。"; return 1; }
+  python3 "$STORAGE_TOOL" verify-member "$file" || { err "部署清单 SHA256 校验失败。"; return 1; }
+  age -d -i "$identity" "$file" > "$temp/manifest.json" || { err "部署清单解密失败。"; return 1; }
   echo "以下清单已经进行脱敏处理，秘密变量值不会显示："
   cat "$temp/manifest.json"
   echo
@@ -1691,9 +1731,19 @@ check_for_project_updates() {
 }
 
 render_main_menu() {
-  python3 - "$VERSION" <<'PYMENU'
+  local summary_target="${BACKUP_TARGET:-未配置}" summary_backup="未记录" summary_remote="未记录" summary_service="未记录"
+  local status_file="/var/lib/vaultwarden-backup/last-result.env"
+  if [[ -f "$status_file" ]]; then
+    # shellcheck disable=SC1090
+    source "$status_file"
+    summary_backup="${FINISHED_AT:-未记录}"
+    summary_remote="${REMOTE_VERIFIED:-unknown}"
+    summary_service="${SERVICE_RESTORED:-unknown}"
+  fi
+  python3 - "$VERSION" "$summary_target" "$summary_backup" "$summary_remote" "$summary_service" <<'PYMENU'
 import sys, unicodedata
 version = sys.argv[1]
+target, backup, remote, service = sys.argv[2:]
 W = 82
 
 def width(s):
@@ -1727,47 +1777,41 @@ row("Vaultwarden Manager", "center")
 row(f"v{version} · 1Panel Edition · Ubuntu / Debian", "center")
 row("Powered by OmenTwwnmfm", "center")
 row()
-row("1Panel 负责应用、Docker、HTTPS；本工具负责数据保护与恢复。")
-row("自动备份使用 systemd timer，不依赖 1Panel 计划任务。")
+row("1Panel 负责应用、Docker、HTTPS；本工具负责数据保护与恢复。", "center")
+row("自动备份使用 systemd timer，不依赖 1Panel 计划任务。", "center")
+row(f"当前备份目标：{target} · 最近备份：{backup}", "center")
+row(f"本地服务恢复：{service} · 远端核验：{remote}", "center")
 sep()
 sections = [
-    ("01 · 环境管理", [
+    ("01 · 快速操作", [
         "[01] 首次配置 / 重新检测容器与数据目录",
-        "[02] 立即备份当前数据并上传当前目标",
-        "[03] 从 GitHub / 本地选择备份并恢复数据",
-        "[04] 检查当前环境和备份配置"]),
-    ("02 · 备份管理", [
-        "[05] 查看最近备份日志",
-        "[06] 查看自动备份定时任务帮助",
-        "[07] 更新已安装的后台脚本（保留现有配置）",
-        "[08] 验证 GitHub / 本地历史备份（SHA256 / age / SQLite）"]),
-    ("03 · 自动化管理", [
-        "[09] 安装 systemd 自动备份 / 修改执行时间",
-        "[10] 查看 systemd 定时任务状态",
-        "[11] 暂停自动备份",
-        "[12] 恢复自动备份"]),
-    ("04 · 安全与诊断", [
-        "[13] 配置通知（Telegram / ntfy / Webhook）并发送测试",
-        "[14] Vaultwarden 更新前自动备份保护",
-        "[15] 生成系统诊断报告"]),
-    ("05 · 历史与恢复", [
-        "[16] 历史备份管理（查看 / 永久保留 / 取消保留 / 删除）",
-        "[17] 查看加密部署清单",
-        "[18] 隔离恢复演练（不连接生产网络、不修改生产数据）"]),
-    ("06 · 策略设置", [
-        "[19] 配置备份策略（保留天数 / 磁盘阈值 / 推送重试）"]),
-    ("07 · 性能监控", [
-        "[20] 性能监控与执行耗时分析（备份 / 恢复 / GitHub / WebDAV）"]),
-    ("08 · 项目维护", [
-        "[21] 检查 / 更新项目源码"]),
-    ("09 · 本地备份", [
-        "[22] 查看 / 删除本地备份（含恢复前快照）",
-        "[23] 验证 / 恢复本地备份"]),
-    ("10 · WebDAV", [
-        "[24] 配置 WebDAV / 选择定时备份目标",
-        "[25] 加密备份上传 WebDAV / 补传本地备份",
-        "[26] 从 WebDAV 选择备份并恢复",
-        "[27] 验证 WebDAV 备份（SHA256 / age / SQLite）"]),
+        "[02] 立即执行备份（GitHub / WebDAV）",
+        "[03] 检查当前环境与备份状态"]),
+    ("02 · 备份与验证", [
+        "[04] 查看备份日志",
+        "[05] 验证历史备份（GitHub / 本地 / WebDAV）",
+        "[06] 查看加密部署清单（GitHub / 本地 / WebDAV）",
+        "[07] 性能监控与执行耗时分析"]),
+    ("03 · 恢复与演练", [
+        "[08] 选择备份并恢复生产数据（GitHub / 本地 / WebDAV）",
+        "[09] 隔离恢复演练（GitHub / 本地 / WebDAV）"]),
+    ("04 · 存储与保留", [
+        "[10] 历史备份文件管理（GitHub / 本地 / WebDAV）",
+        "[11] 查看 / 删除本地备份（本地）",
+        "[12] 配置 WebDAV 连接（WebDAV）",
+        "[13] 上传 / 补传 WebDAV 备份（WebDAV）"]),
+    ("05 · 自动化与安全", [
+        "[14] 安装 / 修改自动备份（GitHub / WebDAV）",
+        "[15] 查看定时任务状态",
+        "[16] 暂停自动备份",
+        "[17] 恢复自动备份",
+        "[18] 配置通知与告警",
+        "[19] 更新前备份保护"]),
+    ("06 · 系统维护", [
+        "[20] 生成系统诊断报告",
+        "[21] 配置备份策略",
+        "[22] 同步已安装后台脚本",
+        "[23] 检查 / 更新项目源码并同步后台脚本"]),
 ]
 for title, items in sections:
     row(title)
@@ -1782,6 +1826,7 @@ PYMENU
 main_menu() {
   require_root
   require_tty
+  load_config >/dev/null 2>&1 || true
   if [[ "${VBM_SKIP_UPDATE_CHECK:-0}" == "1" ]]; then
     unset VBM_SKIP_UPDATE_CHECK
   else
@@ -1790,37 +1835,33 @@ main_menu() {
   while true; do
     clear 2>/dev/null || true
     render_main_menu
-    read -r -p "请选择操作 [00-27]: " choice || exit 0
+    read -r -p "请选择操作 [00-23]: " choice || exit 0
     case "$choice" in
       1|01) configure_wizard || pause ;;
-      2|02) run_backup_now || true ;;
-      3|03) restore_from_github choose || pause ;;
-      4|04) check_configuration || pause ;;
-      5|05) show_logs ;;
-      6|06) show_schedule_help ;;
-      7|07) update_installed_scripts || pause ;;
-      8|08) verify_github_backup choose || pause ;;
-      9|09) install_systemd_timer || pause ;;
-      10) systemd_timer_status ;;
-      11) pause_systemd_timer || pause ;;
-      12) resume_systemd_timer || pause ;;
-      13) configure_notifications || pause ;;
-      14) preupgrade_backup || pause ;;
-      15) generate_diagnostics || pause ;;
-      16) if [[ "$BACKUP_TARGET" == github ]]; then manage_history || pause; else err "历史备份管理目前仅适用于 GitHub 目标。"; pause; fi ;;
-      17) view_deployment_manifest || pause ;;
-      18) restore_rehearsal || pause ;;
-      19) configure_backup_policy || pause ;;
-      20) performance_monitor ;;
-      21) check_for_project_updates; pause ;;
-      22) manage_local_backups || pause ;;
-      23) local_backup_actions || pause ;;
-      24) configure_webdav || true; pause ;;
-      25) webdav_upload_menu || pause ;;
-      26) restore_from_github webdav || pause ;;
-      27) verify_github_backup webdav || pause ;;
+      2|02) manual_backup_menu || true ;;
+      3|03) check_configuration || pause ;;
+      4|04) show_logs ;;
+      5|05) verify_github_backup choose || pause ;;
+      6|06) view_deployment_manifest || pause ;;
+      7|07) performance_monitor ;;
+      8|08) restore_from_github choose || pause ;;
+      9|09) restore_rehearsal || pause ;;
+      10) manage_backup_history || pause ;;
+      11) manage_local_backups || pause ;;
+      12) configure_webdav || true; pause ;;
+      13) webdav_upload_menu || pause ;;
+      14) install_systemd_timer || pause ;;
+      15) systemd_timer_status ;;
+      16) pause_systemd_timer || pause ;;
+      17) resume_systemd_timer || pause ;;
+      18) configure_notifications || pause ;;
+      19) preupgrade_backup || pause ;;
+      20) generate_diagnostics || pause ;;
+      21) configure_backup_policy || pause ;;
+      22) update_installed_scripts || pause ;;
+      23) check_for_project_updates; pause ;;
       0|00) echo "已退出。"; exit 0 ;;
-      *) warn "无效选项，请输入 00-27。"; sleep 1 ;;
+      *) warn "无效选项，请输入 00-23。"; sleep 1 ;;
     esac
   done
 }

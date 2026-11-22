@@ -156,6 +156,19 @@ def verify_local(archive):
     return expected
 
 
+def verify_member(path):
+    path = Path(path)
+    if not regular_file(path) or path.stat().st_size > 4096:
+        raise ValueError("校验文件必须是普通小文件")
+    checksum = Path(str(path) + ".sha256")
+    if not regular_file(checksum):
+        raise ValueError("找不到配套 SHA256 文件")
+    expected = checksum_value(checksum.read_bytes(), path.name)
+    if file_digest(path) != expected:
+        raise ValueError("文件 SHA256 不匹配")
+    return expected
+
+
 class WebDAV:
     def __init__(self, config):
         if not isinstance(config, dict) or any(not isinstance(config.get(field, ""), str) for field in ("url", "username", "secret")):
@@ -343,6 +356,15 @@ class WebDAV:
         for path, expected in pending:
             self.upload_file(path, expected)
 
+    def delete_remote(self, name):
+        require_archive(name)
+        for member in members_for(name):
+            try:
+                self.small_request("DELETE", member)
+            except WebDAVStatusError as error:
+                if error.status != 404:
+                    raise
+
     def download(self, name, directory, min_free_mb=0):
         require_archive(name)
         directory = Path(directory)
@@ -384,6 +406,40 @@ class WebDAV:
         except BaseException:
             target.unlink(missing_ok=True)
             (directory / (name + ".sha256")).unlink(missing_ok=True)
+            raise
+        finally:
+            connection.close()
+        return target
+
+    def download_manifest(self, archive_name, directory):
+        require_archive(archive_name)
+        directory = Path(directory)
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        manifest = archive_name.removesuffix(".tar.gz.age") + ".manifest.json.age"
+        checksum = manifest + ".sha256"
+        content = self.small_request("GET", checksum)
+        expected = checksum_value(content, manifest)
+        target = directory / manifest
+        connection, response = self.request("GET", manifest)
+        try:
+            with target.open("xb") as output:
+                os.chmod(target, 0o600)
+                digest = hashlib.sha256()
+                while chunk := response.read(CHUNK_SIZE):
+                    output.write(chunk)
+                    digest.update(chunk)
+                output.flush()
+                os.fsync(output.fileno())
+            if digest.hexdigest() != expected:
+                raise ValueError("部署清单 SHA256 不匹配")
+            checksum_path = directory / checksum
+            with checksum_path.open("xb") as output:
+                os.chmod(checksum_path, 0o600)
+                output.write(content)
+            verify_member(target)
+        except BaseException:
+            target.unlink(missing_ok=True)
+            (directory / checksum).unlink(missing_ok=True)
             raise
         finally:
             connection.close()
@@ -454,14 +510,21 @@ def main():
     prune.add_argument("retention_days", type=int)
     verify = commands.add_parser("verify")
     verify.add_argument("archive")
+    member_verify = commands.add_parser("verify-member")
+    member_verify.add_argument("member")
     commands.add_parser("configure")
     commands.add_parser("list")
     upload = commands.add_parser("upload")
     upload.add_argument("archive")
+    remote_delete = commands.add_parser("remote-delete")
+    remote_delete.add_argument("name")
     download = commands.add_parser("download")
     download.add_argument("name")
     download.add_argument("directory")
     download.add_argument("--min-free-mb", type=int, default=0)
+    manifest_download = commands.add_parser("download-manifest")
+    manifest_download.add_argument("archive")
+    manifest_download.add_argument("directory")
     args = parser.parse_args()
     if args.command == "local-list":
         for row in local_sets(args.directory):
@@ -481,6 +544,8 @@ def main():
         print(f"已按保留期限清理 {len(removed)} 组本地常规备份")
     elif args.command == "verify":
         verify_local(Path(args.archive))
+    elif args.command == "verify-member":
+        verify_member(Path(args.member))
     elif args.command == "configure":
         configure_webdav(args.config)
         print("WebDAV 目录读取测试通过，配置已保存")
@@ -492,8 +557,13 @@ def main():
         elif args.command == "upload":
             client.upload(Path(args.archive))
             print("WebDAV 上传与远端回读 SHA256 核验通过")
+        elif args.command == "remote-delete":
+            client.delete_remote(args.name)
+            print("WebDAV 备份组已删除")
         elif args.command == "download":
             print(client.download(args.name, args.directory, args.min_free_mb))
+        elif args.command == "download-manifest":
+            print(client.download_manifest(args.archive, args.directory))
 
 
 if __name__ == "__main__":
