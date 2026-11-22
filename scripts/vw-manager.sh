@@ -5,7 +5,7 @@ set -Eeuo pipefail
 umask 077
 unset VW_CONFIG_FILE VW_LOG_FILE VW_LOCK_FILE VW_STATE_DIR VW_COMMON_LIB VW_MANIFEST_TOOL VW_ARCHIVE_CHECK_TOOL VW_MIN_FREE_MB VW_PERF_FILE VW_PERF_LOCK_FILE VW_DIAG_REPORT_DIR
 
-VERSION="1.4.5"
+VERSION="1.4.6"
 CONFIG_FILE="/etc/vaultwarden-backup.conf"
 BACKUP_SCRIPT="/usr/local/sbin/vw-backup.sh"
 RESTORE_SCRIPT="/usr/local/sbin/vw-restore-prepare.sh"
@@ -1430,7 +1430,7 @@ performance_monitor() {
   [[ -f "$tool" ]] || { err "找不到性能分析工具，请从项目目录运行菜单 07 更新脚本。"; pause; return 1; }
   if [[ ! -f "$perf_file" ]]; then
     warn "尚未找到性能记录文件：$perf_file"
-    echo "v1.4.5 已记录主动健康探测、人工输入等待和服务停机窗口。"
+    echo "v1.4.6 已记录主动健康探测、人工输入等待和服务停机窗口。"
     echo "systemd 自动备份使用系统安装版 worker；更新项目后请先执行菜单 07 同步后台脚本。"
     echo "完成一次成功或失败的手动备份/恢复后，再返回此处查看性能记录。"
     pause

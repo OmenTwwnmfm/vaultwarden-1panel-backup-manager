@@ -239,7 +239,7 @@ vw_perf_user_wait_end() {
   now=$(vw_perf_now_ms)
   elapsed=$((now - VW_PERF_USER_WAIT_START_MS))
   (( elapsed < 0 )) && elapsed=0
-  vw_perf_record_event USER_WAIT "$elapsed" informational 0
+  vw_perf_record_event USER_WAIT "$elapsed" informational 0 >&2
   VW_PERF_USER_WAIT_START_MS=""
 }
 
