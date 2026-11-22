@@ -212,8 +212,17 @@ class StorageTests(unittest.TestCase):
     def test_signature_rejects_forged_content_and_unknown_signer(self):
         trust = self.directory / "first-signer"
         untrusted = self.directory / "second-signer"
-        storage.initialize_signing(trust)
-        storage.initialize_signing(untrusted)
+        for directory in (trust, untrusted):
+            directory.mkdir(mode=0o700)
+            key = directory / "backup"
+            subprocess.run(
+                ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)],
+                check=True,
+            )
+            public_key = key.with_suffix(".pub").read_text(encoding="ascii")
+            (directory / "allowed_signers").write_text(
+                f"vbm-backup {public_key}", encoding="ascii", newline="\n"
+            )
         with patch.object(storage, "trusted_file", side_effect=lambda path, **kwargs: path.is_file()):
             with self.assertRaises(storage.MissingSignature):
                 storage.verify_signature(self.archive, trust)
