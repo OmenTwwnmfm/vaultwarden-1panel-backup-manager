@@ -62,18 +62,31 @@ flock() { return "$lock_status"; }
   GITHUB_BRANCH=backup
   GITHUB_SSH_KEY="$TMP/deploy-key"
   AGE_IDENTITY_DEFAULT="$TMP/offline-key"
+  BACKUP_SIGNING_DIR="$TMP/signing"
   printf '%s\n' 'test-key-content' > "$GITHUB_SSH_KEY"
   show_backup_locations > "$TMP/output"
   grep -Fq "本地加密备份目录：$BACKUP_DIR" "$TMP/output"
   grep -Fq "GitHub 备份仓库：$GITHUB_REPO（分支：backup）" "$TMP/output"
   grep -Fq "GitHub 本地工作目录：$REPO_DIR" "$TMP/output"
   grep -Fq "age 恢复私钥默认路径：$AGE_IDENTITY_DEFAULT（本机未找到" "$TMP/output"
+  grep -Fxq "age 加密公钥配置位置：$CONFIG_FILE 中的 AGE_RECIPIENT" "$TMP/output"
+  grep -Fxq "备份签名私钥路径：$BACKUP_SIGNING_DIR/backup（本机未找到）" "$TMP/output"
+  grep -Fxq "备份签名公钥路径：$BACKUP_SIGNING_DIR/backup.pub（本机未找到）" "$TMP/output"
+  grep -Fxq "可信备份签名者名单：$BACKUP_SIGNING_DIR/allowed_signers（本机未找到）" "$TMP/output"
   grep -Fq "GitHub SSH 私钥路径：$GITHUB_SSH_KEY（存在）" "$TMP/output"
   grep -Fq 'WebDAV 备份目录：未配置' "$TMP/output"
   ! grep -Fq 'test-key-content' "$TMP/output" || exit 1
   touch "$WEBDAV_CONFIG_FILE"
+  mkdir "$BACKUP_SIGNING_DIR"
+  printf '%s\n' 'test-signing-key-content' > "$BACKUP_SIGNING_DIR/backup"
+  printf '%s\n' 'test-signing-public-content' > "$BACKUP_SIGNING_DIR/backup.pub"
+  printf '%s\n' 'test-trusted-signers-content' > "$BACKUP_SIGNING_DIR/allowed_signers"
   show_backup_locations > "$TMP/output"
   grep -Fq 'WebDAV 备份目录：https://example.com/backups/vbm/' "$TMP/output"
+  grep -Fxq "备份签名私钥路径：$BACKUP_SIGNING_DIR/backup（存在）" "$TMP/output"
+  grep -Fxq "备份签名公钥路径：$BACKUP_SIGNING_DIR/backup.pub（存在）" "$TMP/output"
+  grep -Fxq "可信备份签名者名单：$BACKUP_SIGNING_DIR/allowed_signers（存在）" "$TMP/output"
+  ! grep -Eq 'test-(signing|trusted-signers).*content' "$TMP/output" || exit 1
 )
 
 manage_backup_history <<< $'3\n2\nyes\n' > "$TMP/output"

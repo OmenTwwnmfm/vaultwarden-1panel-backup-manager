@@ -12,6 +12,7 @@ RESTORE_SCRIPT="/usr/local/sbin/vw-restore-prepare.sh"
 MANAGER_SCRIPT="/usr/local/sbin/vw-manager.sh"
 LOG_FILE="/var/log/vaultwarden-backup.log"
 WEBDAV_CONFIG_FILE="/etc/vaultwarden-webdav.json"
+BACKUP_SIGNING_DIR="/etc/vaultwarden-backup-signing"
 BACKUP_LOCK_FILE="/run/lock/vaultwarden-backup.lock"
 BACKUP_RESULT_FILE="/var/lib/vaultwarden-backup/last-result.env"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -550,12 +551,12 @@ configure_backup_signing() {
   local deploy_key="$1"
   if python3 "$STORAGE_TOOL" check-signing --deploy-key "$deploy_key" >/dev/null 2>&1; then
     ok "备份签名已配置。"
-  elif [[ ! -e /etc/vaultwarden-backup-signing && ! -L /etc/vaultwarden-backup-signing ]] &&
+  elif [[ ! -e "$BACKUP_SIGNING_DIR" && ! -L "$BACKUP_SIGNING_DIR" ]] &&
       confirm_yes "是否初始化独立的备份签名密钥？"; then
     python3 "$STORAGE_TOOL" init-signing || return 1
-    ok "签名密钥已生成。请离线保存 /etc/vaultwarden-backup-signing/allowed_signers。"
+    ok "签名密钥已生成。请离线保存 $BACKUP_SIGNING_DIR/allowed_signers。"
   else
-    warn "备份签名尚未就绪。请检查 /etc/vaultwarden-backup-signing 中的密钥与权限。"
+    warn "备份签名尚未就绪。请检查 $BACKUP_SIGNING_DIR 中的密钥与权限。"
   fi
 }
 
@@ -578,9 +579,13 @@ accept_backup_signature() {
 show_backup_locations() {
   local identity="${AGE_IDENTITY_DEFAULT:-/root/vw-age-identity.txt}"
   local age_state="本机未找到，可从离线介质提供" ssh_state="本机未找到" webdav_location
+  local signing_key_state="本机未找到" signing_public_state="本机未找到" signers_state="本机未找到"
   local github_location="未配置" git_worktree="${REPO_DIR:-未配置}"
   if [[ -f "$identity" ]]; then age_state="存在"; fi
   if [[ -f "$GITHUB_SSH_KEY" ]]; then ssh_state="存在"; fi
+  if [[ -f "$BACKUP_SIGNING_DIR/backup" && ! -L "$BACKUP_SIGNING_DIR/backup" ]]; then signing_key_state="存在"; fi
+  if [[ -f "$BACKUP_SIGNING_DIR/backup.pub" && ! -L "$BACKUP_SIGNING_DIR/backup.pub" ]]; then signing_public_state="存在"; fi
+  if [[ -f "$BACKUP_SIGNING_DIR/allowed_signers" && ! -L "$BACKUP_SIGNING_DIR/allowed_signers" ]]; then signers_state="存在"; fi
   if [[ "$GITHUB_REPO" =~ ^git@github\.com:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git$ ]]; then
     github_location="$GITHUB_REPO（分支：$GITHUB_BRANCH）"
     git_worktree="${REPO_DIR:-/opt/vw-github-repo}"
@@ -598,6 +603,10 @@ show_backup_locations() {
   printf 'GitHub 备份仓库：%s\nGitHub 本地工作目录：%s\n' "$github_location" "$git_worktree"
   printf 'WebDAV 备份目录：%s\n' "$webdav_location"
   printf 'age 恢复私钥默认路径：%s（%s）\n' "$identity" "$age_state"
+  printf 'age 加密公钥配置位置：%s 中的 AGE_RECIPIENT\n' "$CONFIG_FILE"
+  printf '备份签名私钥路径：%s/backup（%s）\n' "$BACKUP_SIGNING_DIR" "$signing_key_state"
+  printf '备份签名公钥路径：%s/backup.pub（%s）\n' "$BACKUP_SIGNING_DIR" "$signing_public_state"
+  printf '可信备份签名者名单：%s/allowed_signers（%s）\n' "$BACKUP_SIGNING_DIR" "$signers_state"
   printf 'GitHub SSH 私钥路径：%s（%s）\n' "$GITHUB_SSH_KEY" "$ssh_state"
   printf '备份配置文件：%s\nWebDAV 凭据文件：%s\n\n' "$CONFIG_FILE" "$WEBDAV_CONFIG_FILE"
 }
@@ -1054,7 +1063,7 @@ restore_from_github() (
     return 1
   fi
   (cd "$BACKUP_DIR" && sha256sum "$(basename "$rollback_archive")" > "$(basename "$rollback_archive").sha256")
-  if [[ -e /etc/vaultwarden-backup-signing/backup ]]; then
+  if [[ -e "$BACKUP_SIGNING_DIR/backup" ]]; then
     python3 "$STORAGE_TOOL" sign "$rollback_archive" || { err "回滚快照签名失败，生产数据尚未替换。"; return 1; }
   fi
   if ! (cd "$BACKUP_DIR" && sha256sum -c "$(basename "$rollback_archive").sha256") || ! age -d -i "$identity" "$rollback_archive" | tar -tzf - >/dev/null; then
