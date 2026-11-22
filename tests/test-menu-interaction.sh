@@ -4,7 +4,7 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP=$(mktemp -d)
 trap 'rm -rf -- "$TMP"' EXIT
 
-sed -n '/^choose_backup_name() {/,/^}/p; /^manage_backup_history() {/,/^}/p; /^manage_history() (/,/^)/p; /^render_main_menu() {/,/^}/p; /^main_menu() {/,/^}/p' "$ROOT/scripts/vw-manager.sh" > "$TMP/functions.sh"
+sed -n '/^show_backup_locations() {/,/^}/p; /^choose_backup_name() {/,/^}/p; /^manage_backup_history() {/,/^}/p; /^manage_history() (/,/^)/p; /^render_main_menu() {/,/^}/p; /^main_menu() {/,/^}/p' "$ROOT/scripts/vw-manager.sh" > "$TMP/functions.sh"
 source "$TMP/functions.sh"
 
 STORAGE_TOOL=mock-storage-tool
@@ -39,6 +39,10 @@ python3() {
   if [[ "$1" == - ]]; then PYTHONUTF8=1 python "$@"; return; fi
   [[ "$1" == "$STORAGE_TOOL" ]] || return 1
   case "$2" in
+    --config)
+      [[ "$3" == "$WEBDAV_CONFIG_FILE" && "$4" == location ]] || return 1
+      printf '%s\n' 'https://example.com/backups/vbm/'
+      ;;
     list)
       ((list_status == 0)) || return "$list_status"
       printf '%s\n' "$first_archive" "$second_archive"
@@ -48,6 +52,29 @@ python3() {
   esac
 }
 flock() { return "$lock_status"; }
+
+(
+  CONFIG_FILE="$TMP/backup.conf"
+  WEBDAV_CONFIG_FILE="$TMP/webdav.json"
+  BACKUP_DIR="$TMP/local-backups"
+  REPO_DIR="$TMP/git-worktree"
+  GITHUB_REPO=git@github.com:example/vaultwarden-backup.git
+  GITHUB_BRANCH=backup
+  GITHUB_SSH_KEY="$TMP/deploy-key"
+  AGE_IDENTITY_DEFAULT="$TMP/offline-key"
+  printf '%s\n' 'test-key-content' > "$GITHUB_SSH_KEY"
+  show_backup_locations > "$TMP/output"
+  grep -Fq "本地加密备份目录：$BACKUP_DIR" "$TMP/output"
+  grep -Fq "GitHub 备份仓库：$GITHUB_REPO（分支：backup）" "$TMP/output"
+  grep -Fq "GitHub 本地工作目录：$REPO_DIR" "$TMP/output"
+  grep -Fq "age 恢复私钥默认路径：$AGE_IDENTITY_DEFAULT（本机未找到" "$TMP/output"
+  grep -Fq "GitHub SSH 私钥路径：$GITHUB_SSH_KEY（存在）" "$TMP/output"
+  grep -Fq 'WebDAV 备份目录：未配置' "$TMP/output"
+  ! grep -Fq 'test-key-content' "$TMP/output" || exit 1
+  touch "$WEBDAV_CONFIG_FILE"
+  show_backup_locations > "$TMP/output"
+  grep -Fq 'WebDAV 备份目录：https://example.com/backups/vbm/' "$TMP/output"
+)
 
 manage_backup_history <<< $'3\n2\nyes\n' > "$TMP/output"
 [[ "$(cat "$TMP/deleted")" == "$second_archive" ]]

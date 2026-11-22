@@ -177,7 +177,7 @@ class WebDAV:
         if not isinstance(config, dict) or any(not isinstance(config.get(field, ""), str) for field in ("url", "username", "secret")):
             raise ValueError("WebDAV 配置字段格式无效")
         parsed = urllib.parse.urlsplit(config["url"])
-        if parsed.scheme not in ("https", "http") or not parsed.hostname or "@" in parsed.netloc or parsed.query or parsed.fragment:
+        if parsed.scheme not in ("https", "http") or not parsed.hostname or "@" in parsed.netloc or parsed.query or parsed.fragment or not parsed.netloc.isprintable():
             raise ValueError("WebDAV 地址须为专用目录 URL，凭据请填写到用户名和密码字段")
         if parsed.scheme == "http" and parsed.hostname not in ("localhost", "127.0.0.1", "::1"):
             raise ValueError("远程 WebDAV 必须使用 HTTPS")
@@ -199,6 +199,9 @@ class WebDAV:
             raise ValueError("WebDAV 凭据格式无效")
         token = base64.b64encode((username + ":" + secret).encode("utf-8")).decode("ascii")
         self.authorization = "Basic " + token
+
+    def backup_url(self):
+        return urllib.parse.urlunsplit((self.parsed.scheme, self.parsed.netloc, self.path, "", ""))
 
     def request(self, method, name="", body=None, headers=None):
         stored_name = name.split(".upload-", 1)[0]
@@ -513,6 +516,7 @@ def main():
     member_verify = commands.add_parser("verify-member")
     member_verify.add_argument("member")
     commands.add_parser("configure")
+    commands.add_parser("location")
     commands.add_parser("list").add_argument("--manifests", action="store_true")
     upload = commands.add_parser("upload")
     upload.add_argument("archive")
@@ -556,7 +560,9 @@ def main():
         print("WebDAV 目录读取测试通过，配置已保存")
     else:
         client = WebDAV(load_webdav_config(args.config))
-        if args.command == "list":
+        if args.command == "location":
+            print(client.backup_url())
+        elif args.command == "list":
             for name in client.list_archives(manifests=args.manifests):
                 print(name)
         elif args.command == "upload":

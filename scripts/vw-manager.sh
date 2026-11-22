@@ -11,6 +11,7 @@ BACKUP_SCRIPT="/usr/local/sbin/vw-backup.sh"
 RESTORE_SCRIPT="/usr/local/sbin/vw-restore-prepare.sh"
 MANAGER_SCRIPT="/usr/local/sbin/vw-manager.sh"
 LOG_FILE="/var/log/vaultwarden-backup.log"
+WEBDAV_CONFIG_FILE="/etc/vaultwarden-webdav.json"
 BACKUP_LOCK_FILE="/run/lock/vaultwarden-backup.lock"
 BACKUP_RESULT_FILE="/var/lib/vaultwarden-backup/last-result.env"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -533,9 +534,37 @@ configure_wizard() {
   pause
 }
 
+show_backup_locations() {
+  local identity="${AGE_IDENTITY_DEFAULT:-/root/vw-age-identity.txt}"
+  local age_state="本机未找到，可从离线介质提供" ssh_state="本机未找到" webdav_location
+  local github_location="未配置" git_worktree="${REPO_DIR:-未配置}"
+  if [[ -f "$identity" ]]; then age_state="存在"; fi
+  if [[ -f "$GITHUB_SSH_KEY" ]]; then ssh_state="存在"; fi
+  if [[ "$GITHUB_REPO" =~ ^git@github\.com:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git$ ]]; then
+    github_location="$GITHUB_REPO（分支：$GITHUB_BRANCH）"
+    git_worktree="${REPO_DIR:-/opt/vw-github-repo}"
+  elif [[ -n "$GITHUB_REPO" ]]; then
+    github_location="已配置，请在配置文件中查看仓库地址"
+  fi
+  if [[ ! -e "$WEBDAV_CONFIG_FILE" && ! -L "$WEBDAV_CONFIG_FILE" ]]; then
+    webdav_location="未配置，请使用菜单 [12]"
+  elif ! webdav_location=$(python3 "$STORAGE_TOOL" --config "$WEBDAV_CONFIG_FILE" location 2>/dev/null); then
+    webdav_location="无法读取，请检查菜单 [12] 的配置"
+  fi
+
+  echo "========== 备份与密钥路径 =========="
+  printf '本地加密备份目录：%s\n' "$BACKUP_DIR"
+  printf 'GitHub 备份仓库：%s\nGitHub 本地工作目录：%s\n' "$github_location" "$git_worktree"
+  printf 'WebDAV 备份目录：%s\n' "$webdav_location"
+  printf 'age 恢复私钥默认路径：%s（%s）\n' "$identity" "$age_state"
+  printf 'GitHub SSH 私钥路径：%s（%s）\n' "$GITHUB_SSH_KEY" "$ssh_state"
+  printf '备份配置文件：%s\nWebDAV 凭据文件：%s\n\n' "$CONFIG_FILE" "$WEBDAV_CONFIG_FILE"
+}
+
 check_configuration() {
-  require_docker || return 1
   load_config || return 1
+  show_backup_locations
+  require_docker || return 1
   echo "========== 配置检查 =========="
   printf '配置中记录的容器：%s\n配置中记录的数据目录：%s\n' "$CONTAINER" "$DATA_DIR"
   if ! vw_find_target "$CONTAINER" "$DATA_DIR" true; then

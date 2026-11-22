@@ -284,6 +284,9 @@ class WebDAVTests(unittest.TestCase):
         self.directory.chmod(0o700)
         if os.name == "posix" and os.geteuid() != 0:
             self.skipTest("Production CLI requires root-owned config")
+        location = subprocess.check_output([sys.executable, "-B", str(ROOT / "scripts/vw-storage.py"), "--config", str(config_path), "location"], text=True, encoding="utf-8")
+        self.assertEqual(location.strip(), self.config["url"] + "vbm/")
+        self.assertEqual(self.server.requests, [])
         output = subprocess.check_output([sys.executable, "-B", str(ROOT / "scripts/vw-storage.py"), "--config", str(config_path), "upload", str(self.archive)], text=True, encoding="utf-8")
         self.assertIn("SHA256", output)
         self.assertNotIn("secret-value", output)
@@ -366,8 +369,7 @@ class WebDAVTests(unittest.TestCase):
 
     def test_existing_vbm_url_is_not_nested_again(self):
         client = storage.WebDAV(dict(self.config, url=self.config["url"] + "vbm/"))
-        self.assertTrue(client.path.endswith("/vbm/"))
-        self.assertFalse(client.path.endswith("/vbm/vbm/"))
+        self.assertEqual(client.backup_url(), self.config["url"] + "vbm/")
 
     def test_rollback_archive_roundtrip(self):
         archive = make_pair(self.directory, ROLLBACK)
