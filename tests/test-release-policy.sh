@@ -6,22 +6,40 @@ trap 'rm -rf -- "$TMP"' EXIT
 source "$ROOT/scripts/vw-maintenance.sh"
 
 git init --quiet --initial-branch=main "$TMP/repo"
-git -C "$TMP/repo" -c user.name=Tester -c user.email=test@example.invalid commit --quiet --allow-empty -m 'Release fixture'
-git -C "$TMP/repo" -c user.name=Tester -c user.email=test@example.invalid tag -a v1.5.0 -m 'Unsigned fixture'
-[[ $(git -C "$TMP/repo" cat-file -t v1.5.0) == tag ]]
-if verify_release_tag "$TMP/repo" v1.5.0 v1.5.0 "$TMP/signers"; then exit 1; fi
+git -C "$TMP/repo" config user.name Tester
+git -C "$TMP/repo" config user.email test@example.invalid
+mkdir "$TMP/repo/scripts"
+printf '%s\n' 'VERSION="1.5.0"' > "$TMP/repo/scripts/vw-manager.sh"
+printf '%s\n' '# Changelog' > "$TMP/repo/CHANGELOG.md"
+printf '%s\n' 'printf "Restarted manager\n"' > "$TMP/repo/run.sh"
+git -C "$TMP/repo" add -- scripts/vw-manager.sh CHANGELOG.md run.sh
+git -C "$TMP/repo" commit --quiet -m 'Initial version'
+git clone --quiet "$TMP/repo" "$TMP/client"
+initial_commit=$(git -C "$TMP/client" rev-parse HEAD)
+git -C "$TMP/repo" commit --quiet --allow-empty -m 'Update v1.5.0 on main'
+updated_commit=$(git -C "$TMP/repo" rev-parse HEAD)
+
+info() { printf '%s\n' "$*"; }
+ok() { printf '%s\n' "$*"; }
+warn() { printf '%s\n' "$*" >&2; }
+install_helper_scripts() { printf '%s\n' 'Synced helpers'; }
+
+export VBM_PROJECT_ROOT="$TMP/client" UPDATE_CHANNEL=stable
+VERSION=1.5.0
+(check_for_project_updates) <<< no > "$TMP/declined"
+[[ "$(git -C "$TMP/client" rev-parse HEAD)" == "$initial_commit" ]]
+(check_for_project_updates) <<< yes > "$TMP/updated"
+[[ "$(git -C "$TMP/client" rev-parse HEAD)" == "$updated_commit" ]]
+[[ -z "$(git -C "$TMP/client" tag --list)" ]]
+grep -Fxq 'Synced helpers' "$TMP/updated"
+grep -Fxq 'Restarted manager' "$TMP/updated"
+
+printf '%s\n' 'VERSION="1.4.10"' > "$TMP/repo/scripts/vw-manager.sh"
+git -C "$TMP/repo" commit --quiet -am 'Lower version on main'
+if (check_for_project_updates) <<< yes; then exit 1; fi
+[[ "$(git -C "$TMP/client" rev-parse HEAD)" == "$updated_commit" ]]
+
 release_version_allowed 1.4.8 1.5.0
 if release_version_allowed 1.5.0 1.4.10; then exit 1; fi
 if release_version_allowed 1.5.0 1.6.0-dev; then exit 1; fi
-
-ssh-keygen -q -t ed25519 -N "" -f "$TMP/test-key"
-printf 'release-test %s\n' "$(cat "$TMP/test-key.pub")" > "$TMP/signers"
-git -C "$TMP/repo" -c user.name=Tester -c user.email=test@example.invalid -c gpg.format=ssh -c user.signingkey="$TMP/test-key" tag -s v1.5.1 -m 'Signed fixture'
-signed_commit=$(verify_release_tag "$TMP/repo" v1.5.1 v1.5.1 "$TMP/signers")
-[[ "$signed_commit" == "$(git -C "$TMP/repo" rev-parse HEAD)" ]]
-if verify_release_tag "$TMP/repo" v1.5.1 v9.0.0 "$TMP/signers"; then exit 1; fi
-
-git init --quiet "$TMP/client"
-git -C "$TMP/client" fetch --no-tags "$TMP/repo" refs/tags/v1.5.1
-[[ "$(verify_release_tag "$TMP/client" FETCH_HEAD v1.5.1 "$TMP/signers")" == "$signed_commit" ]]
-echo 'PASS: update policy accepts trusted tags and rejects unsigned, relabeled and downgraded versions'
+echo 'PASS: updater follows main with confirmation, ignores legacy channel settings, and rejects downgrades'
