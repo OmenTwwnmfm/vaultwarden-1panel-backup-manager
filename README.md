@@ -10,7 +10,7 @@
 ![Panel](https://img.shields.io/badge/panel-1Panel-1677ff)
 ![Encryption](https://img.shields.io/badge/encryption-age-16a34a)
 ![Scheduler](https://img.shields.io/badge/scheduler-systemd-6d28d9)
-![Version](https://img.shields.io/badge/version-1.4.8-blue)
+![Version](https://img.shields.io/badge/version-1.5.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 </div>
@@ -31,9 +31,18 @@ Vaultwarden 将用户密码库保存在自己的服务器上，因此需要可�
 
 ## 功能特点
 
-### v1.4.8 菜单结构
+### v1.5.0 升级说明
 
-主菜单重组为六类，操作编号重新排列为 `[01]`–`[23]`。`[02]` 可选择手动备份目标，`[14]` 设置定时备份目标、频率和时间。顶部摘要分别显示定时目标、定时器状态和最近一次备份结果。
+菜单 `[01]`–`[23]` 沿用 v1.4.8。升级后运行 `[22]` 同步后台脚本，在 `[03]` 初始化独立的备份签名密钥，并把 `/etc/vaultwarden-backup-signing/allowed_signers` 留存到离线介质。
+
+- 新备份和部署清单各带 `.sha256.sig`。恢复、解密验证和读取清单会验签。已知来源的无签名旧备份可以逐次输入 `UNSIGNED` 继续。
+- 本地自动清理前核对远端副本。菜单 `[10]` 删除 GitHub 文件后保留本地备份，可用 `[11]` 单独清理。
+- `PRIMARY_TARGET` 和可选的 `SECONDARY_TARGET` 共用一次快照。上传失败的目标进入待补传队列，下一次运行会尝试补传。
+- `vbm status` 显示快照、远端核验和演练记录。默认稳定渠道使用可信签名标签，需要先配置 `/etc/vaultwarden-release-signers`。可显式设置 `UPDATE_CHANNEL=main` 选择开发渠道。
+
+### 菜单结构
+
+主菜单分为六类。`[02]` 可选择手动备份目标，`[14]` 设置定时备份目标、频率和时间。顶部摘要分别显示定时目标、定时器状态和最近一次备份结果。
 
 完整显示顺序见 [`docs/完整使用手册.md`](docs/完整使用手册.md) 的“主菜单分组”章节。
 
@@ -51,9 +60,9 @@ WebDAV 支持独立配置。首次向导 `[01]` 可选择 `webdav`，已有 GitH
 
 WebDAV 使用已有 age 公钥加密完整 `/data` 和部署清单。备份只写入填写目录下独立的 `vbm/` 子目录；若 URL 已以 `vbm/` 结尾则直接使用该目录，不会再嵌套一层。该目录可在有父级写权限时由 WebDAV 自动创建。服务器应支持 `PROPFIND`、`MKCOL`、`GET`、`PUT`、`MOVE`、`DELETE`，并使用 HTTPS。支持用户名与密码或应用密码，凭据单独保存于 root 所有、权限 `600` 的 `/etc/vaultwarden-webdav.json`。上传先生成临时文件，回读并计算 SHA256 后用 `MOVE` 发布，SHA256 文件最后发布。同名同内容可重复补传，同名不同内容会停止。上传成功要求再次回读核验。
 
-本地默认目录为 `/var/backups/vaultwarden`。`vw-*.tar.gz.age` 是常规数据备份，`pre-restore-*.tar.gz.age` 是恢复前数据快照，`.manifest.json.age` 是加密部署清单，`.sha256` 是对应校验文件。每组通常包含两至四个文件。可在 `[11]` 单独清理本地备份。`[10]` 删除 GitHub 备份并推送成功后，也会清理匹配的本地文件。
+本地默认目录为 `/var/backups/vaultwarden`。`vw-*.tar.gz.age` 是常规数据备份，`pre-restore-*.tar.gz.age` 是恢复前数据快照，`.manifest.json.age` 是加密部署清单。`.sha256` 和 `.sha256.sig` 分别保存校验值和签名。可在 `[11]` 清理本地副本。
 
-本地删除持有备份共用锁，检查保护标记、目录重叠并要求确认。本地恢复与 WebDAV 恢复共用 SQLite 检查、恢复前加密快照、容器停止复查和启动失败回滚。成功的 WebDAV 备份会按 `RETENTION_DAYS` 清理过期本地常规备份，保留 `pre-restore-*` 和 `.keep` 保护文件。WebDAV 远端保留期限由存储服务管理。
+本地删除持有备份共用锁，检查保护标记、目录重叠并要求确认。过期清理保留 `pre-restore-*`、`.keep` 和待补传的备份组，并在删除前核验完整副本。WebDAV 远端保留可在 `[21]` 配置，默认关闭。
 
 ### 性能监控与执行耗时分析
 
@@ -336,7 +345,7 @@ vbm
 
 如果此前显示 `Command 'vbm' not found`，进入项目目录重新运行 `sudo bash ./run.sh` 即可触发自修复；若 `/usr/local/bin` 不在系统 PATH 中，脚本会在适用时创建 `/usr/bin/vbm` 兼容入口。
 
-交互式启动或选择 `[23]` 时会检查源码更新。工作区干净、远程提交可快进且用户确认后，管理器执行 `git pull --ff-only` 并同步后台脚本。
+交互式启动或选择 `[23]` 时会检查源码更新。稳定渠道先验证发布标签，再检查目标版本和快进关系。用户确认后同步后台脚本。
 
 ### 性能记录为空时怎么办？
 

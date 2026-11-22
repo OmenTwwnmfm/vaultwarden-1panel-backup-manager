@@ -3,6 +3,8 @@ import argparse
 import base64
 import hashlib
 import http.client
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import json
 import os
 from pathlib import Path
@@ -10,6 +12,7 @@ import re
 import shutil
 import ssl
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -20,9 +23,10 @@ import xml.etree.ElementTree as ET
 
 ARCHIVE_PATTERN = re.compile(r"(?:vw|pre-restore)-\d{8}-\d{6}(?:-\d+)?\.tar\.gz\.age\Z")
 MEMBER_PATTERN = re.compile(
-    r"((?:vw|pre-restore)-\d{8}-\d{6}(?:-\d+)?)(?:\.tar\.gz\.age|\.manifest\.json\.age)(?:\.sha256|\.keep)?\Z"
+    r"((?:vw|pre-restore)-\d{8}-\d{6}(?:-\d+)?)(?:\.tar\.gz\.age|\.manifest\.json\.age)(?:\.sha256(?:\.sig)?|\.keep)?\Z"
 )
 DEFAULT_CONFIG = "/etc/vaultwarden-webdav.json"
+SIGNING_DIRECTORY = "/etc/vaultwarden-backup-signing"
 CHUNK_SIZE = 1024 * 1024
 MANIFEST_LIMIT = 1024 * 1024
 
@@ -31,6 +35,10 @@ class WebDAVStatusError(ValueError):
     def __init__(self, method, status):
         self.status = status
         super().__init__(f"WebDAV {method} 返回 HTTP {status}")
+
+
+class MissingSignature(ValueError):
+    pass
 
 
 def regular_file(path):
@@ -46,7 +54,7 @@ def require_archive(name):
 def members_for(name):
     require_archive(name)
     manifest = name.removesuffix(".tar.gz.age") + ".manifest.json.age"
-    return [name, name + ".sha256", manifest, manifest + ".sha256"]
+    return [name, name + ".sha256", manifest, manifest + ".sha256", name + ".sha256.sig", manifest + ".sha256.sig"]
 
 
 def local_sets(directory):
@@ -96,7 +104,7 @@ def delete_local(directory, name, data_dir, repo_dir):
     return len(paths)
 
 
-def prune_local(directory, retention_days, now=None):
+def prune_local(directory, retention_days, now=None, *, replica=None, pending=None):
     if not isinstance(retention_days, int) or retention_days < 1:
         raise ValueError("本地备份保留天数必须为正整数")
     directory = Path(directory).resolve(strict=True)
@@ -104,7 +112,7 @@ def prune_local(directory, retention_days, now=None):
     removed = []
     for row in local_sets(directory):
         name = row["name"]
-        if name.startswith("pre-restore-"):
+        if name.startswith("pre-restore-") or queued(pending, name):
             continue
         archive = directory / name
         if not regular_file(archive) or archive.stat().st_mtime >= cutoff:
@@ -115,10 +123,34 @@ def prune_local(directory, retention_days, now=None):
             continue
         if any(not regular_file(path) for path in group):
             continue
+        try:
+            verify_local(archive)
+            if any(path.name.startswith(name.removesuffix(".tar.gz.age") + ".manifest") for path in group):
+                verify_member(directory / members[2])
+            if replica is None or not all(replica(path) for path in group):
+                raise ValueError("副本缺失或内容不同")
+        except (OSError, ValueError, http.client.HTTPException):
+            print(f"保留本地备份 {name}：无法确认有完整副本。", file=sys.stderr)
+            continue
         for path in group:
             path.unlink()
         removed.append(name)
     return removed
+
+
+def queued(pending, name):
+    return pending is not None and any((pending / target / name).exists() for target in ("github", "webdav"))
+
+
+def git_replica(repo, commit, path):
+    marker = commit + ":" + path.name + ".keep"
+    if subprocess.run(["git", "-C", str(repo), "cat-file", "-e", marker], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+        return False
+    with subprocess.Popen(["git", "-C", str(repo), "cat-file", "blob", commit + ":" + path.name], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as process:
+        digest = hashlib.sha256()
+        while chunk := process.stdout.read(CHUNK_SIZE):
+            digest.update(chunk)
+        return process.wait() == 0 and digest.hexdigest() == file_digest(path)
 
 
 def checksum_value(content, name):
@@ -170,6 +202,85 @@ def verify_member(path):
     if file_digest(path) != expected:
         raise ValueError("文件 SHA256 不匹配")
     return expected
+
+
+def trusted_file(path, *, private=False):
+    if not regular_file(path):
+        return False
+    if os.name != "posix":
+        return True
+    metadata = path.stat()
+    parent = path.parent
+    for directory in (parent, *parent.parents):
+        if directory.is_symlink() or directory.stat().st_uid != 0 or directory.stat().st_mode & 0o022:
+            return False
+    return metadata.st_uid == 0 and not metadata.st_mode & 0o022 and (not private or stat.S_IMODE(metadata.st_mode) == 0o600)
+
+
+def initialize_signing(directory):
+    directory = Path(directory)
+    directory.mkdir(mode=0o700, exist_ok=True)
+    key = directory / "backup"
+    signers = directory / "allowed_signers"
+    public_key = key.with_suffix(".pub")
+    if any(os.path.lexists(path) for path in (key, public_key, signers)):
+        raise ValueError("签名目录已有密钥或信任配置，请保留原配置")
+    if directory.is_symlink() or (os.name == "posix" and (directory.stat().st_uid != 0 or directory.stat().st_mode & 0o022)):
+        raise ValueError("签名目录权限不安全")
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "vbm-backup", "-f", str(key)], check=True)
+    with signers.open("x", encoding="ascii") as stream:
+        stream.write("vbm-backup " + public_key.read_text(encoding="ascii"))
+
+
+def check_signing_key(directory, deploy_key=None):
+    directory = Path(directory)
+    key = directory / "backup"
+    if not trusted_file(key, private=True) or not trusted_file(directory / "allowed_signers"):
+        raise ValueError("签名密钥或可信签名者文件缺失或权限不安全，请在菜单 [03] 初始化")
+    if deploy_key and Path(deploy_key).is_file():
+        public_keys = [
+            subprocess.check_output(["ssh-keygen", "-y", "-P", "", "-f", str(path)], stderr=subprocess.DEVNULL, timeout=10).split()[:2]
+            for path in (key, deploy_key)
+        ]
+        if public_keys[0] == public_keys[1]:
+            raise ValueError("备份签名密钥必须独立于 GitHub Deploy Key")
+    return key
+
+
+def sign_backup(path, directory):
+    key = check_signing_key(directory)
+    checksum = Path(str(path) + ".sha256")
+    if os.path.lexists(str(checksum) + ".sig"):
+        raise ValueError("签名文件已存在")
+    subprocess.run(["ssh-keygen", "-Y", "sign", "-f", str(key), "-n", "vbm-backup", str(checksum)], check=True, stderr=subprocess.DEVNULL, timeout=10)
+    verify_signature(path, directory)
+
+
+def verify_signature(path, directory):
+    checksum = Path(str(path) + ".sha256")
+    signature = Path(str(checksum) + ".sig")
+    if not os.path.lexists(signature):
+        raise MissingSignature("备份没有签名")
+    signers = Path(directory) / "allowed_signers"
+    if not trusted_file(signers) or not regular_file(signature) or signature.stat().st_size > 4096:
+        raise ValueError("签名或可信签名者文件缺失或无效")
+    if not regular_file(checksum) or checksum.stat().st_size > 4096:
+        raise ValueError("签名对应的 SHA256 文件无效")
+    checksum_bytes = checksum.read_bytes()
+    expected = checksum_value(checksum_bytes, path.name)
+    result = subprocess.run(
+        ["ssh-keygen", "-Y", "verify", "-f", str(signers), "-I", "vbm-backup", "-n", "vbm-backup", "-s", str(signature)],
+        input=checksum_bytes, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+    )
+    if result.returncode != 0 or not regular_file(path) or file_digest(path) != expected:
+        raise ValueError("备份签名或内容验证失败")
+
+
+def parse_webdav_xml(content):
+    xml_text = content.decode("utf-8-sig")
+    if "<!DOCTYPE" in xml_text.upper() or "<!ENTITY" in xml_text.upper():
+        raise ValueError("WebDAV XML 包含不受支持的声明")
+    return ET.fromstring(xml_text)
 
 
 class WebDAV:
@@ -248,9 +359,7 @@ class WebDAV:
                 if create_error.status not in (405, 409):
                     raise
             content = self.small_request("PROPFIND", body=body, headers=headers)
-        if b"<!DOCTYPE" in content.upper() or b"<!ENTITY" in content.upper():
-            raise ValueError("WebDAV XML 包含不受支持的声明")
-        root = ET.fromstring(content)
+        root = parse_webdav_xml(content)
         collection = any(
             resource is not None and resource.find("{DAV:}collection") is not None
             for resource in root.findall(".//{DAV:}resourcetype")
@@ -258,16 +367,16 @@ class WebDAV:
         if root.tag != "{DAV:}multistatus" or not collection:
             raise ValueError("WebDAV vbm 目录不存在或不是集合")
 
-    def list_archives(self, *, manifests=False):
-        self.ensure_directory()
-        body = b'<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/></d:prop></d:propfind>'
+    def list_members(self):
+        return set(self.directory_members())
+
+    def directory_members(self, *, temporary=False):
+        body = b'<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/><d:getlastmodified/></d:prop></d:propfind>'
         content = self.small_request("PROPFIND", body=body, headers={"Depth": "1", "Content-Type": "application/xml"}, limit=8 * 1024 * 1024)
-        if b"<!DOCTYPE" in content.upper() or b"<!ENTITY" in content.upper():
-            raise ValueError("WebDAV XML 包含不受支持的声明")
-        root = ET.fromstring(content)
+        root = parse_webdav_xml(content)
         if root.tag != "{DAV:}multistatus":
             raise ValueError("WebDAV 未返回 multistatus 列表")
-        names = set()
+        names = {}
         base_path = urllib.parse.unquote(self.path)
         for entry in root.findall("{DAV:}response"):
             href = urllib.parse.urlsplit(entry.findtext("{DAV:}href", ""))
@@ -281,16 +390,65 @@ class WebDAV:
             if not path.startswith(base_path):
                 continue
             name = path[len(base_path):]
-            if not MEMBER_PATTERN.fullmatch(name) or name.endswith(".keep"):
+            if temporary:
+                basename, separator, suffix = name.rpartition(".upload-")
+                if not separator or not MEMBER_PATTERN.fullmatch(basename) or not re.fullmatch(r"[a-f0-9]{32}", suffix):
+                    continue
+            elif not MEMBER_PATTERN.fullmatch(name):
                 continue
             for propstat in entry.findall("{DAV:}propstat"):
                 status_text = propstat.findtext("{DAV:}status", "")
                 resource = propstat.find("{DAV:}prop/{DAV:}resourcetype")
                 if " 200 " in status_text and resource is not None and len(resource) == 0:
-                    names.add(name)
+                    names[name] = propstat.findtext("{DAV:}prop/{DAV:}getlastmodified")
+        return names
+
+    def cleanup_uploads(self):
+        try:
+            for name, modified in self.directory_members(temporary=True).items():
+                if not modified:
+                    continue
+                try:
+                    last_modified = parsedate_to_datetime(modified)
+                except (ValueError, TypeError, OverflowError):
+                    continue
+                if last_modified.tzinfo is not None and time.time() - last_modified.timestamp() > 7 * 86400:
+                    self.small_request("DELETE", name)
+        except (OSError, ValueError, ET.ParseError, http.client.HTTPException):
+            print("WebDAV 临时对象清理未完成，下次上传会重试。", file=sys.stderr)
+
+    def list_archives(self, *, manifests=False):
+        names = self.list_members()
         suffix = ".manifest.json.age" if manifests else ".tar.gz.age"
         matches = (name for name in names if name.endswith(suffix) and name + ".sha256" in names)
         return sorted(matches, key=lambda name: re.search(r"\d{8}-\d{6}", name)[0], reverse=True)
+
+    def prune(self, local_directory, days, minimum, pending=None):
+        if days == 0:
+            return
+        if days < 0 or minimum < 1:
+            raise ValueError("WebDAV 保留配置无效")
+        names = self.list_members()
+        archives = sorted(
+            (name for name in names if name.startswith("vw-") and ARCHIVE_PATTERN.fullmatch(name) and name + ".sha256" in names),
+            reverse=True,
+        )
+        cutoff = time.time() - days * 86400
+        for name in archives[minimum:]:
+            members = members_for(name)
+            if queued(pending, name) or any(member + ".keep" in names for member in members):
+                continue
+            stamp = re.search(r"\d{8}-\d{6}", name)[0]
+            if datetime.strptime(stamp, "%Y%m%d-%H%M%S").replace(tzinfo=timezone.utc).timestamp() >= cutoff - 86400:
+                continue
+            remote_members = [member for member in members if member in names]
+            try:
+                if not all(regular_file(local_directory / member) and file_digest(local_directory / member) == self.remote_digest(member) for member in remote_members):
+                    continue
+                self.delete_remote(name)
+                print(f"WebDAV 已清理：{name}")
+            except (OSError, ValueError, http.client.HTTPException):
+                print(f"WebDAV 清理失败，保留本地副本：{name}", file=sys.stderr)
 
     def remote_digest(self, name):
         connection, response = self.request("GET", name)
@@ -334,6 +492,8 @@ class WebDAV:
     def upload(self, archive):
         archive = Path(archive)
         verify_local(archive)
+        self.ensure_directory()
+        self.cleanup_uploads()
         members = members_for(archive.name)
         pairs = [(members[0], members[1])]
         manifest = archive.parent / members[2]
@@ -347,8 +507,12 @@ class WebDAV:
             pairs.insert(0, (members[2], members[3]))
         pending = []
         for encrypted, checksum in pairs:
-            for name in (encrypted, checksum):
+            signature_name = checksum + ".sig"
+            files = (encrypted, checksum, signature_name) if os.path.lexists(archive.parent / signature_name) else (encrypted, checksum)
+            for name in files:
                 path = archive.parent / name
+                if not regular_file(path):
+                    raise ValueError("备份组包含非普通文件")
                 expected = file_digest(path)
                 try:
                     existing = self.remote_digest(name)
@@ -365,6 +529,9 @@ class WebDAV:
 
     def delete_remote(self, name):
         require_archive(name)
+        names = self.list_members()
+        if any(member + ".keep" in names for member in members_for(name)):
+            raise ValueError("该 WebDAV 备份组受 .keep 保护")
         for member in members_for(name):
             try:
                 connection, response = self.request("DELETE", member)
@@ -374,6 +541,14 @@ class WebDAV:
             except WebDAVStatusError as error:
                 if error.status != 404:
                     raise
+
+    def get_signature(self, name):
+        try:
+            return self.small_request("GET", name + ".sha256.sig")
+        except WebDAVStatusError as error:
+            if error.status != 404:
+                raise
+            return None
 
     def download(self, name, directory, min_free_mb=0):
         require_archive(name)
@@ -406,16 +581,22 @@ class WebDAV:
                     digest.update(chunk)
                 output.flush()
                 os.fsync(output.fileno())
+            if expected_length is not None and downloaded != expected_length:
+                raise ValueError("WebDAV 下载长度与 Content-Length 不符")
             if digest.hexdigest() != expected:
                 raise ValueError("WebDAV 下载 SHA256 不匹配")
             checksum_path = directory / (name + ".sha256")
             with checksum_path.open("xb") as output:
                 os.chmod(checksum_path, 0o600)
                 output.write(checksum)
+            signature = self.get_signature(name)
+            if signature is not None:
+                (directory / (name + ".sha256.sig")).write_bytes(signature)
             verify_local(target)
         except BaseException:
             target.unlink(missing_ok=True)
             (directory / (name + ".sha256")).unlink(missing_ok=True)
+            (directory / (name + ".sha256.sig")).unlink(missing_ok=True)
             raise
         finally:
             connection.close()
@@ -435,8 +616,12 @@ class WebDAV:
         if hashlib.sha256(payload).hexdigest() != expected:
             raise ValueError("部署清单 SHA256 不匹配")
         created = []
+        signature = self.get_signature(manifest)
+        files = [(target, payload), (checksum_path, content)]
+        if signature is not None:
+            files.append((directory / (manifest + ".sha256.sig"), signature))
         try:
-            for path, data in ((target, payload), (checksum_path, content)):
+            for path, data in files:
                 with path.open("xb") as output:
                     created.append(path)
                     os.chmod(path, 0o600)
@@ -498,6 +683,7 @@ def main():
     sys.stdout.reconfigure(newline="\n")
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=DEFAULT_CONFIG)
+    parser.add_argument("--signing-dir", default=SIGNING_DIRECTORY, type=Path)
     commands = parser.add_subparsers(dest="command", required=True)
     listing = commands.add_parser("local-list")
     listing.add_argument("directory")
@@ -511,6 +697,20 @@ def main():
     prune = commands.add_parser("prune-local")
     prune.add_argument("directory")
     prune.add_argument("retention_days", type=int)
+    replica = prune.add_mutually_exclusive_group()
+    replica.add_argument("--replica", type=Path)
+    replica.add_argument("--replica-git", nargs=2, metavar=("REPOSITORY", "VERIFIED_COMMIT"))
+    replica.add_argument("--webdav", action="store_true")
+    prune.add_argument("--pending", type=Path)
+    remote_prune = commands.add_parser("prune-webdav")
+    remote_prune.add_argument("directory", type=Path)
+    remote_prune.add_argument("days", type=int)
+    remote_prune.add_argument("minimum", type=int)
+    remote_prune.add_argument("--pending", type=Path)
+    commands.add_parser("init-signing")
+    commands.add_parser("check-signing").add_argument("--deploy-key")
+    commands.add_parser("sign").add_argument("path", type=Path)
+    commands.add_parser("verify-signature").add_argument("path", type=Path)
     verify = commands.add_parser("verify")
     verify.add_argument("archive")
     member_verify = commands.add_parser("verify-member")
@@ -549,8 +749,28 @@ def main():
     elif args.command == "local-delete":
         print(f"已删除 {delete_local(args.directory, args.name, args.data_dir, args.repo_dir)} 个本地文件")
     elif args.command == "prune-local":
-        removed = prune_local(args.directory, args.retention_days)
+        replica_check = None
+        if args.replica:
+            replica_check = lambda path: regular_file(args.replica / path.name) and file_digest(path) == file_digest(args.replica / path.name)
+        elif args.replica_git:
+            repo, commit = args.replica_git
+            if not re.fullmatch(r"[a-f0-9]{40,64}", commit):
+                raise ValueError("Git 副本必须指定已核验的提交")
+            replica_check = lambda path: git_replica(repo, commit, path)
+        elif args.webdav:
+            remote = WebDAV(load_webdav_config(args.config))
+            remote_names = remote.list_members()
+            replica_check = lambda path: path.name in remote_names and path.name + ".keep" not in remote_names and remote.remote_digest(path.name) == file_digest(path)
+        removed = prune_local(args.directory, args.retention_days, replica=replica_check, pending=args.pending)
         print(f"已按保留期限清理 {len(removed)} 组本地常规备份")
+    elif args.command == "init-signing":
+        initialize_signing(args.signing_dir)
+    elif args.command == "check-signing":
+        check_signing_key(args.signing_dir, args.deploy_key)
+    elif args.command == "sign":
+        sign_backup(args.path, args.signing_dir)
+    elif args.command == "verify-signature":
+        verify_signature(args.path, args.signing_dir)
     elif args.command == "verify":
         verify_local(Path(args.archive))
     elif args.command == "verify-member":
@@ -571,6 +791,8 @@ def main():
         elif args.command == "remote-delete":
             client.delete_remote(args.name)
             print("WebDAV 备份组已删除")
+        elif args.command == "prune-webdav":
+            client.prune(args.directory, args.days, args.minimum, args.pending)
         elif args.command == "download":
             print(client.download(args.name, args.directory, args.min_free_mb))
         elif args.command == "download-manifest":
@@ -580,7 +802,10 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (OSError, ValueError, KeyError, TypeError, ET.ParseError, http.client.HTTPException) as error:
+    except MissingSignature as error:
+        print(f"[警告] {error}", file=sys.stderr)
+        sys.exit(3)
+    except (OSError, ValueError, KeyError, TypeError, ET.ParseError, http.client.HTTPException, subprocess.SubprocessError) as error:
         if isinstance(error, ValueError):
             detail = str(error)
         else:

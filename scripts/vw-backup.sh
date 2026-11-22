@@ -28,6 +28,8 @@ LOCAL_VERIFIED=false
 DECRYPT_VERIFIED=false
 SERVICE_RESTORED=false
 REMOTE_VERIFIED=false
+REMOTE_VERIFIED_GITHUB=false
+REMOTE_VERIFIED_WEBDAV=false
 CONTAINER="unknown"
 DATA_DIR="unknown"
 FILENAME="unknown"
@@ -59,6 +61,8 @@ write_result() {
     printf 'DECRYPT_VERIFIED=%q\n' "$DECRYPT_VERIFIED"
     printf 'SERVICE_RESTORED=%q\n' "$SERVICE_RESTORED"
     printf 'REMOTE_VERIFIED=%q\n' "$REMOTE_VERIFIED"
+    printf 'REMOTE_VERIFIED_GITHUB=%q\n' "$REMOTE_VERIFIED_GITHUB"
+    printf 'REMOTE_VERIFIED_WEBDAV=%q\n' "$REMOTE_VERIFIED_WEBDAV"
     printf 'BACKUP_TARGET=%q\n' "${UPLOAD_TARGET:-${BACKUP_TARGET:-github}}"
     printf 'REASON=%q\n' "$reason"
   } > "$tmp"
@@ -98,25 +102,23 @@ GIT_RETRY_DELAY="${GIT_RETRY_DELAY:-15}"
 NOTIFY_METHOD="${NOTIFY_METHOD:-none}"
 NOTIFY_ON_SUCCESS="${NOTIFY_ON_SUCCESS:-true}"
 NOTIFY_ON_FAILURE="${NOTIFY_ON_FAILURE:-true}"
-BACKUP_TARGET="${BACKUP_TARGET:-github}"
+BACKUP_TARGET="${PRIMARY_TARGET:-${BACKUP_TARGET:-github}}"
 UPLOAD_TARGET="${1:-$BACKUP_TARGET}"
+SECONDARY_TARGET="${SECONDARY_TARGET:-none}"
+SNAPSHOT_MODE="${SNAPSHOT_MODE:-stop}"
+[[ "$SECONDARY_TARGET" == none || "$SECONDARY_TARGET" == github || "$SECONDARY_TARGET" == webdav ]] || exit 2
+[[ "$SNAPSHOT_MODE" == stop || "$SNAPSHOT_MODE" == online ]] || exit 2
 [[ "$UPLOAD_TARGET" == github || "$UPLOAD_TARGET" == webdav ]] || { echo "ERROR: Backup target must be github or webdav."; exit 2; }
 REPO_DIR="${REPO_DIR:-/opt/vw-github-repo}"
 MAX_FILE_MIB="${MAX_FILE_MIB:-90}"
 
 required_vars=(CONTAINER DATA_DIR AGE_RECIPIENT BACKUP_DIR RETENTION_DAYS)
-if [[ "$UPLOAD_TARGET" == github ]]; then required_vars+=(GITHUB_REPO GITHUB_BRANCH GITHUB_SSH_KEY REPO_DIR); fi
 for var in "${required_vars[@]}"; do [[ -n "${!var:-}" ]] || { echo "ERROR: Config value $var is empty."; exit 1; }; done
 for cmd in docker age sha256sum stat readlink find cp flock date tar gzip awk head du df python3 sqlite3 timeout; do
   command -v "$cmd" >/dev/null 2>&1 || { echo "ERROR: Required command missing: $cmd"; exit 1; }
 done
 [[ -f "$MANIFEST_TOOL" ]] || { echo "ERROR: Missing deployment manifest tool: $MANIFEST_TOOL"; exit 1; }
-if [[ "$UPLOAD_TARGET" == github ]]; then
-  command -v git >/dev/null 2>&1 || { echo "ERROR: Required command missing: git"; exit 1; }
-  [[ -f "$GITHUB_SSH_KEY" ]] || { echo "ERROR: GitHub SSH private key not found: $GITHUB_SSH_KEY"; exit 1; }
-else
-  python3 "$STORAGE_TOOL" list > /dev/null || { echo "ERROR: WebDAV preflight failed; no container stop or local snapshot was started."; exit 1; }
-fi
+python3 "$STORAGE_TOOL" check-signing --deploy-key "${GITHUB_SSH_KEY:-}" || exit 1
 [[ "$AGE_RECIPIENT" =~ ^age1[[:alnum:]]+$ ]] || { echo "ERROR: AGE_RECIPIENT is not a valid age public-key-shaped value."; exit 1; }
 [[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]] && (( RETENTION_DAYS >= 1 )) || { echo "ERROR: RETENTION_DAYS must be positive."; exit 1; }
 [[ "$MAX_FILE_MIB" =~ ^[0-9]+$ ]] && (( MAX_FILE_MIB >= 1 && MAX_FILE_MIB <= 95 )) || { echo "ERROR: MAX_FILE_MIB must be 1..95."; exit 1; }
@@ -243,7 +245,7 @@ paths_overlap() { local a="$1" b="$2"; [[ "$a" == "$b" || "$a" == "$b/"* || "$b"
 if paths_overlap "$DATA_CANON" "$BACKUP_CANON"; then
   FAILURE_REASON="DATA_DIR and BACKUP_DIR overlap"; echo "ERROR: $FAILURE_REASON"; exit 1
 fi
-if [[ "$UPLOAD_TARGET" == github ]]; then
+if [[ "$UPLOAD_TARGET" == github || "$SECONDARY_TARGET" == github || -d "$STATE_DIR/pending/github" ]]; then
   REPO_CANON=$(readlink -m -- "$REPO_DIR")
   if paths_overlap "$DATA_CANON" "$REPO_CANON" || paths_overlap "$BACKUP_CANON" "$REPO_CANON"; then
     FAILURE_REASON="DATA_DIR, BACKUP_DIR and REPO_DIR overlap"; echo "ERROR: $FAILURE_REASON"; exit 1
@@ -256,26 +258,123 @@ echo "Source /data size: $(vw_format_bytes "$SOURCE_BYTES")"
 echo "SQLite db.sqlite3: $(vw_format_bytes "$DB_BYTES")"
 
 mkdir -p "$BACKUP_DIR"; chmod 700 "$BACKUP_DIR"
-if [[ "$UPLOAD_TARGET" == github ]]; then mkdir -p "$REPO_DIR"; chmod 700 "$REPO_DIR"; fi
 vw_require_free_space "$DATA_DIR" "$MIN_FREE_BYTES" "数据盘" || { FAILURE_REASON="insufficient free space on DATA_DIR filesystem"; exit 1; }
 BACKUP_REQUIRED_BYTES=$(( SOURCE_BYTES + SOURCE_BYTES / 5 ))
 if (( BACKUP_REQUIRED_BYTES < MIN_FREE_BYTES )); then BACKUP_REQUIRED_BYTES="$MIN_FREE_BYTES"; fi
 vw_require_free_space "$BACKUP_DIR" "$BACKUP_REQUIRED_BYTES" "本地备份目录" || { FAILURE_REASON="insufficient free space on BACKUP_DIR filesystem"; exit 1; }
-if [[ "$UPLOAD_TARGET" == github ]]; then
-  vw_require_free_space "$REPO_DIR" "$BACKUP_REQUIRED_BYTES" "Git 仓库目录" || { FAILURE_REASON="insufficient free space on REPO_DIR filesystem"; exit 1; }
-fi
 vw_require_free_space /var/tmp "$MIN_FREE_BYTES" "临时目录" || { FAILURE_REASON="insufficient free space on temporary filesystem"; exit 1; }
 AVAILABLE_BYTES=$(df -PB1 -- "$BACKUP_DIR" | awk 'NR==2 {print $4}')
 echo "Available backup disk: $(vw_format_bytes "$AVAILABLE_BYTES")"
-if [[ "$UPLOAD_TARGET" == github ]]; then
-[[ -d "$REPO_DIR/.git" ]] || { FAILURE_REASON="Git backup worktree is not initialized"; echo "ERROR: Run setup/configuration first."; exit 1; }
-existing_url=$(git -C "$REPO_DIR" remote get-url origin 2>/dev/null || true)
-[[ "$existing_url" == "$GITHUB_REPO" ]] || { FAILURE_REASON="Git origin differs from configured repository"; echo "ERROR: Configured=$GITHUB_REPO Existing=${existing_url:-<none>}"; exit 1; }
-git -C "$REPO_DIR" config user.name "Vaultwarden Backup"
-git -C "$REPO_DIR" config user.email "vaultwarden-backup@localhost"
-printf -v GIT_SSH_COMMAND 'ssh -i %q -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/root/.ssh/known_hosts' "$GITHUB_SSH_KEY"
-export GIT_SSH_COMMAND
-fi
+upload_snapshot() (
+  local target="$1" archive="$2" name manifest member remote_head local_head attempt existing_url
+  python3 "$STORAGE_TOOL" verify-signature "$archive" || return 1
+  manifest="${archive%.tar.gz.age}.manifest.json.age"
+  python3 "$STORAGE_TOOL" verify-signature "$manifest" || return 1
+  if [[ "$target" == webdav ]]; then
+    python3 "$STORAGE_TOOL" upload "$archive"
+    return $?
+  fi
+  [[ -d "$REPO_DIR/.git" && -n "${GITHUB_REPO:-}" && -n "${GITHUB_BRANCH:-}" && -f "${GITHUB_SSH_KEY:-}" ]] || { echo "GitHub target configuration is incomplete."; return 1; }
+  name=$(basename -- "$archive") || return 1
+  (( $(stat -c '%s' "$archive") <= MAX_FILE_MIB * 1024 * 1024 )) || { echo "Backup exceeds GitHub file size limit."; return 1; }
+  vw_require_free_space "$REPO_DIR" "$MIN_FREE_BYTES" "Git 仓库目录" || return 1
+  existing_url=$(git -C "$REPO_DIR" remote get-url origin) || return 1
+  [[ "$existing_url" == "$GITHUB_REPO" ]] || { echo "GitHub worktree origin does not match the backup configuration."; return 1; }
+  printf -v GIT_SSH_COMMAND 'ssh -i %q -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/root/.ssh/known_hosts' "$GITHUB_SSH_KEY"
+  export GIT_SSH_COMMAND
+  remote_head=$(git -C "$REPO_DIR" ls-remote --heads origin "refs/heads/$GITHUB_BRANCH") || return 1
+  if [[ -n "$remote_head" ]]; then
+    git -C "$REPO_DIR" fetch origin "+refs/heads/$GITHUB_BRANCH:refs/remotes/origin/$GITHUB_BRANCH" || return 1
+    if ! git -C "$REPO_DIR" show-ref --verify --quiet "refs/heads/$GITHUB_BRANCH"; then
+      git -C "$REPO_DIR" switch -c "$GITHUB_BRANCH" --track "origin/$GITHUB_BRANCH" || return 1
+    fi
+  fi
+  [[ "$(git -C "$REPO_DIR" branch --show-current)" == "$GITHUB_BRANCH" ]] || git -C "$REPO_DIR" switch "$GITHUB_BRANCH" || return 1
+  if [[ -n "$remote_head" ]]; then git -C "$REPO_DIR" merge --ff-only "origin/$GITHUB_BRANCH" || return 1; fi
+  git -C "$REPO_DIR" diff --cached --quiet || return 1
+  local -a members=()
+  for member in "$archive" "$archive.sha256" "$archive.sha256.sig" "$manifest" "$manifest.sha256" "$manifest.sha256.sig"; do
+    local destination="$REPO_DIR/$(basename -- "$member")"
+    if [[ -e "$destination" || -L "$destination" ]]; then
+      [[ -f "$destination" && ! -L "$destination" ]] && cmp -s -- "$member" "$destination" || return 1
+    else
+      cp -p -- "$member" "$destination" || return 1
+    fi
+    members+=("$(basename -- "$member")")
+  done
+  git -C "$REPO_DIR" add -- "${members[@]}" || return 1
+  if ! git -C "$REPO_DIR" diff --cached --quiet; then
+    git -C "$REPO_DIR" commit -m "Vaultwarden encrypted backup $name" || return 1
+  fi
+  for ((attempt=1; attempt<=GIT_PUSH_RETRIES; attempt++)); do
+    if git -C "$REPO_DIR" push origin "$GITHUB_BRANCH"; then
+      local_head=$(git -C "$REPO_DIR" rev-parse HEAD) || return 1
+      remote_head=$(git -C "$REPO_DIR" ls-remote --heads origin "refs/heads/$GITHUB_BRANCH") || return 1
+      [[ "${remote_head%%$'\t'*}" == "$local_head" ]] || return 1
+      for member in "${members[@]}"; do
+        git -C "$REPO_DIR" show "$local_head:$member" | cmp -s -- "$BACKUP_DIR/$member" - || return 1
+      done
+      printf '%s\n' "$local_head" > "$TMP_ROOT/github-verified-commit"
+      return $?
+    fi
+    if ((attempt < GIT_PUSH_RETRIES)); then sleep "$GIT_RETRY_DELAY"; fi
+  done
+  return 1
+)
+
+try_pending_upload() {
+  local target="$1" marker="$2"
+  if upload_snapshot "$target" "$BACKUP_DIR/${marker##*/}"; then
+    touch "$STATE_DIR/verified-$target" && rm -- "$marker"
+  else
+    echo "Upload to $target failed, pending: ${marker##*/}"
+    return 1
+  fi
+}
+
+mkdir -p "$STATE_DIR/pending/github" "$STATE_DIR/pending/webdav"
+for queued_target in github webdav; do
+  for pending_marker in "$STATE_DIR/pending/$queued_target"/vw-*.tar.gz.age; do
+    [[ -f "$pending_marker" && ! -L "$pending_marker" ]] || continue
+    try_pending_upload "$queued_target" "$pending_marker" || break
+  done
+done
+
+check_backup_ages() {
+  [[ "${VW_EXECUTION_MODE:-}" == systemd ]] || return 0
+  local hours="${ALERT_MAX_BACKUP_AGE_HOURS:-}" days="${ALERT_MAX_DRILL_AGE_DAYS:-90}" now timestamp pending_count oldest count=0
+  case "$BACKUP_FREQUENCY" in
+    weekly) hours="${hours:-192}" ;;
+    monthly) hours="${hours:-768}" ;;
+    *) hours="${hours:-36}" ;;
+  esac
+  [[ "$hours" =~ ^[1-9][0-9]{0,4}$ && "$days" =~ ^[1-9][0-9]{0,3}$ ]] || return 0
+  now=$(date +%s)
+  if [[ -f "$STATE_DIR/verified-$BACKUP_TARGET" ]]; then
+    timestamp=$(stat -c %Y "$STATE_DIR/verified-$BACKUP_TARGET")
+    if (( now - timestamp > hours * 3600 )); then
+      vw_notify failure "Vaultwarden: $BACKUP_TARGET backup verification is overdue." || true
+    fi
+  else
+    vw_notify failure "Vaultwarden: no successful $BACKUP_TARGET verification has been recorded since upgrading." || true
+  fi
+  touch -a "$STATE_DIR/monitor-start"
+  timestamp=$(stat -c %Y "$STATE_DIR/drill-verified" 2>/dev/null || stat -c %Y "$STATE_DIR/monitor-start")
+  if (( now - timestamp > days * 86400 )); then
+    vw_notify failure "Vaultwarden: an isolated recovery drill is overdue." || true
+  fi
+  pending_count=$(find "$STATE_DIR/pending" -type f -name 'vw-*.tar.gz.age' -printf '%T@\n')
+  oldest=$now
+  for timestamp in $pending_count; do
+    timestamp=${timestamp%.*}
+    count=$((count + 1))
+    if (( timestamp < oldest )); then oldest=$timestamp; fi
+  done
+  if (( count >= 7 || now - oldest > hours * 3600 )); then
+    vw_notify failure "Vaultwarden: $count uploads pending, please check connectivity and backup logs." || true
+  fi
+}
+check_backup_ages
 
 vw_perf_stage_end success
 vw_perf_stage_begin "manifest_generation"
@@ -286,6 +385,16 @@ if ! python3 "$MANIFEST_TOOL" "$CONTAINER" "$MANIFEST_PLAIN"; then FAILURE_REASO
 vw_perf_stage_end success
 # Snapshot the whole /data mount while the app is stopped. All SQLite DB/WAL/SHM
 # files and attachments therefore belong to one consistent point in time.
+SNAPSHOT_SOURCE="$DATA_DIR"
+if [[ "$SNAPSHOT_MODE" == online ]]; then
+  echo "Creating an online SQLite snapshot while Vaultwarden is running..."
+  SNAPSHOT_SOURCE="$TMP_ROOT/online"
+  vw_require_free_space "$TMP_ROOT" "$BACKUP_REQUIRED_BYTES" "在线备份暂存目录" || exit 1
+  mkdir "$SNAPSHOT_SOURCE"
+  sqlite3 -readonly "$DATA_DIR/db.sqlite3" ".timeout 10000" ".backup '$SNAPSHOT_SOURCE/db.sqlite3'"
+  chmod --reference="$DATA_DIR/db.sqlite3" "$SNAPSHOT_SOURCE/db.sqlite3"
+  if (( EUID == 0 )); then chown --reference="$DATA_DIR/db.sqlite3" "$SNAPSHOT_SOURCE/db.sqlite3"; fi
+else
 echo "Stopping Vaultwarden briefly to create a consistent /data snapshot..."
 vw_perf_downtime_begin
 vw_perf_stage_begin "container_stop"
@@ -295,10 +404,11 @@ if [[ "${VW_CONTAINER_STOPPED_BY_HELPER:-0}" == 1 ]]; then STOPPED=1; fi
 if (( stop_rc != 0 )); then FAILURE_REASON="could not confirm the target container stopped"; exit 1; fi
 CONTAINER="$VW_DETECTED_CONTAINER"
 vw_perf_stage_end success
+fi
 
 vw_perf_stage_begin "sqlite_quick_check"
 if command -v sqlite3 >/dev/null 2>&1; then
-  SQLITE_RESULT=$(sqlite3 -readonly "$DATA_DIR/db.sqlite3" 'PRAGMA quick_check;' 2>&1) || { FAILURE_REASON="SQLite quick_check command failed: $SQLITE_RESULT"; echo "ERROR: $FAILURE_REASON"; exit 1; }
+  SQLITE_RESULT=$(sqlite3 -readonly "$SNAPSHOT_SOURCE/db.sqlite3" 'PRAGMA quick_check;' 2>&1) || { FAILURE_REASON="SQLite quick_check command failed: $SQLITE_RESULT"; echo "ERROR: $FAILURE_REASON"; exit 1; }
   [[ "$SQLITE_RESULT" == "ok" ]] || { FAILURE_REASON="SQLite quick_check failed: $SQLITE_RESULT"; echo "ERROR: $FAILURE_REASON"; exit 1; }
   echo "SQLite quick_check: OK"
   vw_perf_stage_end success "$(stat -c '%s' "$DATA_DIR/db.sqlite3")"
@@ -310,7 +420,11 @@ fi
 vw_perf_stage_begin "snapshot_tar_age"
 echo "Creating encrypted complete /data snapshot..."
 OUTPUT_CREATED=true
-if ! tar --numeric-owner -czpf - -C "$DATA_DIR" . | age -r "$AGE_RECIPIENT" -o "$OUTPUT"; then FAILURE_REASON="tar/gzip/age pipeline failed"; exit 1; fi
+if [[ "$SNAPSHOT_MODE" == online ]]; then
+  tar --numeric-owner --exclude='./db.sqlite3' --exclude='./db.sqlite3-*' -czpf - -C "$DATA_DIR" . -C "$SNAPSHOT_SOURCE" db.sqlite3 | age -r "$AGE_RECIPIENT" -o "$OUTPUT"
+else
+  tar --numeric-owner -czpf - -C "$DATA_DIR" . | age -r "$AGE_RECIPIENT" -o "$OUTPUT"
+fi
 [[ -s "$OUTPUT" ]] || { FAILURE_REASON="encrypted archive is empty"; exit 1; }
 SNAPSHOT_CREATED=true
 SIZE_BYTES=$(stat -c '%s' "$OUTPUT")
@@ -318,15 +432,20 @@ HEADER=$(head -n 1 "$OUTPUT" 2>/dev/null || true)
 [[ "$HEADER" == "age-encryption.org/v1" ]] || { FAILURE_REASON="output is not a valid age file header"; exit 1; }
 (cd "$BACKUP_DIR" && sha256sum "$FILENAME" > "$FILENAME.sha256" && sha256sum -c "$FILENAME.sha256") || { FAILURE_REASON="snapshot SHA256 validation failed"; exit 1; }
 LOCAL_VERIFIED=true
+touch "$STATE_DIR/local-snapshot"
 write_result running "encrypted snapshot created and SHA256 verified" || { FAILURE_REASON="could not persist snapshot result state"; exit 1; }
 vw_perf_stage_end success "$SIZE_BYTES"
 
 # Start the service immediately after snapshot generation, before Git/network work.
+if [[ "$STOPPED" == 1 ]]; then
 echo "Encrypted snapshot created. Restarting Vaultwarden before network upload..."
 vw_perf_stage_begin "container_start_command"
 if ! docker start "$CONTAINER" >/dev/null; then FAILURE_REASON="snapshot made but docker start failed"; vw_perf_stage_end failed; exit 1; fi
 STOPPED=0
 vw_perf_stage_end success
+else
+  vw_perf_record_event SERVICE_DOWNTIME 0 aggregate 0
+fi
 
 vw_perf_stage_begin "container_health_check_wait"
 health_rc=0
@@ -338,13 +457,7 @@ vw_perf_downtime_end success
 vw_perf_stage_begin "local_validation_manifest_checksum"
 
 echo "Vaultwarden is running; continuing offline validation and $UPLOAD_TARGET upload."
-MAX_BYTES=$((MAX_FILE_MIB * 1024 * 1024))
 echo "Encrypted backup size: $(vw_format_bytes "$SIZE_BYTES")"
-if [[ "$UPLOAD_TARGET" == github ]] && (( SIZE_BYTES > MAX_BYTES )); then
-  FAILURE_REASON="backup exceeds GitHub file size limit (${MAX_FILE_MIB} MiB); encrypted file and SHA256 retained locally at $OUTPUT"
-  echo "ERROR: $FAILURE_REASON"
-  exit 1
-fi
 
 # If the original identity was deliberately kept on this host, perform actual
 # decrypt + tar + SQLite validation. This is optional: normal scheduled backup
@@ -363,6 +476,7 @@ if [[ -n "${AGE_IDENTITY_DEFAULT:-}" && -f "$AGE_IDENTITY_DEFAULT" ]]; then
       SQLITE_RESULT=$(sqlite3 -readonly "$VALIDATE_DIR/db.sqlite3" 'PRAGMA quick_check;' 2>&1) || { FAILURE_REASON="decrypted SQLite quick_check failed: $SQLITE_RESULT"; exit 1; }
       [[ "$SQLITE_RESULT" == "ok" ]] || { FAILURE_REASON="decrypted SQLite quick_check returned: $SQLITE_RESULT"; exit 1; }
       DECRYPT_VERIFIED=true
+      touch "$STATE_DIR/decrypt-verified"
       echo "Local age decrypt + tar + SQLite validation on tmpfs: PASS"
       rm -rf -- "$VALIDATE_DIR"
       VALIDATE_DIR=""
@@ -387,104 +501,47 @@ MANIFEST_COMPLETE=true
 (cd "$BACKUP_DIR" && sha256sum -c "$FILENAME.sha256" && sha256sum -c "$MANIFEST_FILENAME.sha256")
 LOCAL_VERIFIED=true
 MANIFEST_VERIFIED=true
+python3 "$STORAGE_TOOL" sign "$OUTPUT" && python3 "$STORAGE_TOOL" sign "$MANIFEST_OUTPUT" || { FAILURE_REASON="backup signing failed; local ciphertext retained"; exit 1; }
 vw_perf_stage_end success "$SIZE_BYTES"
-if [[ "$UPLOAD_TARGET" == webdav ]]; then
-  vw_perf_stage_begin "webdav_upload_readback_verify"
-  if ! python3 "$STORAGE_TOOL" upload "$OUTPUT"; then
-    FAILURE_REASON="WebDAV upload or readback verification failed; local encrypted backup retained"
-    exit 1
-  fi
-  REMOTE_VERIFIED=true
-  vw_perf_stage_end success "$SIZE_BYTES"
-  if ! python3 "$STORAGE_TOOL" prune-local "$BACKUP_DIR" "$RETENTION_DAYS"; then
-    echo "WARNING: WebDAV backup verified, but local retention cleanup did not complete."
-  fi
-else
-vw_perf_stage_begin "github_sync_retention_push_verify"
-
-# Refresh the checked-out branch before pruning so recently-added permanent
-# keep markers from GitHub are applied to both the working tree and local copy.
-REMOTE_HEADS=$(git -C "$REPO_DIR" ls-remote --heads origin "refs/heads/$GITHUB_BRANCH") || { FAILURE_REASON="cannot read GitHub branch before retention cleanup"; exit 1; }
-if [[ -n "$REMOTE_HEADS" ]]; then
-  git -C "$REPO_DIR" fetch origin "+refs/heads/$GITHUB_BRANCH:refs/remotes/origin/$GITHUB_BRANCH" || { FAILURE_REASON="cannot fetch GitHub branch before retention cleanup"; exit 1; }
-  git -C "$REPO_DIR" show-ref --verify --quiet "refs/heads/$GITHUB_BRANCH" || git -C "$REPO_DIR" switch -c "$GITHUB_BRANCH" --track "origin/$GITHUB_BRANCH" >/dev/null
-  git -C "$REPO_DIR" merge --ff-only "origin/$GITHUB_BRANCH" || { FAILURE_REASON="local and remote histories diverged before retention cleanup"; exit 1; }
+targets=("$UPLOAD_TARGET")
+if [[ "$SECONDARY_TARGET" != none && "$SECONDARY_TARGET" != "$UPLOAD_TARGET" ]]; then
+  targets+=("$SECONDARY_TARGET")
 fi
-# Copy remote protection markers to the local backup directory before its
-# retention pass. Marker files contain no secrets and are tracked in GitHub.
-for marker in "$REPO_DIR"/vw-*.tar.gz.age.keep; do
-  [[ -f "$marker" ]] || continue
-  marker_name=$(basename "$marker")
-  archive_name="${marker_name%.keep}"
-  [[ -f "$BACKUP_DIR/$archive_name" ]] && cp -p "$marker" "$BACKUP_DIR/$marker_name"
-  manifest_name="${archive_name%.tar.gz.age}.manifest.json.age"
-  if [[ -f "$REPO_DIR/$manifest_name.keep" && -f "$BACKUP_DIR/$manifest_name" ]]; then
-    cp -p "$REPO_DIR/$manifest_name.keep" "$BACKUP_DIR/$manifest_name.keep"
-  fi
+for target in "${targets[@]}"; do
+  touch "$STATE_DIR/pending/$target/$FILENAME"
 done
-
-# Keep the current working tree tidy while honoring explicit .keep markers.
-# Removing files from the branch does NOT prune Git's historical objects.
-prune_expired_backups() {
-  local dir="$1" archive name base manifest
-  [[ -d "$dir" ]] || return 0
-  while IFS= read -r -d '' archive; do
-    name=$(basename -- "$archive")
-    base="${name%.tar.gz.age}"
-    if [[ -e "$dir/$name.keep" ]]; then
-      echo "Retention: protected backup retained: $name"
-      continue
-    fi
-    rm -f -- "$dir/$name" "$dir/$name.sha256"
-    manifest="${base}.manifest.json.age"
-    if [[ -e "$dir/$manifest.keep" ]]; then
-      echo "Retention: protected manifest retained: $manifest"
-    else
-      rm -f -- "$dir/$manifest" "$dir/$manifest.sha256"
-    fi
-    echo "Retention: expired backup and paired manifest removed from current directory: $name"
-  done < <(find "$dir" -maxdepth 1 -type f -name 'vw-*.tar.gz.age' -mtime "+$RETENTION_DAYS" -print0)
-}
-prune_expired_backups "$BACKUP_DIR"
-cp -p "$OUTPUT" "$REPO_DIR/$FILENAME"; cp -p "$OUTPUT.sha256" "$REPO_DIR/$FILENAME.sha256"
-cp -p "$MANIFEST_OUTPUT" "$REPO_DIR/$MANIFEST_FILENAME"; cp -p "$MANIFEST_OUTPUT.sha256" "$REPO_DIR/$MANIFEST_FILENAME.sha256"
-prune_expired_backups "$REPO_DIR"
-
-# Synchronize safely with the remote branch; never force-push. Retry transient
-# network failures and perform a fast-forward fetch before each subsequent try.
-REMOTE_HEADS=$(git -C "$REPO_DIR" ls-remote --heads origin "refs/heads/$GITHUB_BRANCH") || { FAILURE_REASON="cannot read GitHub branch; check SSH Deploy Key/network"; exit 1; }
-if [[ -n "$REMOTE_HEADS" ]]; then
-  git -C "$REPO_DIR" fetch origin "+refs/heads/$GITHUB_BRANCH:refs/remotes/origin/$GITHUB_BRANCH"
-  if git -C "$REPO_DIR" show-ref --verify --quiet "refs/heads/$GITHUB_BRANCH"; then
-    git -C "$REPO_DIR" switch "$GITHUB_BRANCH" >/dev/null 2>&1 || true
-    git -C "$REPO_DIR" merge --ff-only "origin/$GITHUB_BRANCH" || { FAILURE_REASON="local and remote Git histories diverged; no force push attempted"; exit 1; }
+for target in "${targets[@]}"; do
+  if [[ "$target" == github ]]; then
+    vw_perf_stage_begin "github_sync_retention_push_verify"
   else
-    git -C "$REPO_DIR" switch -c "$GITHUB_BRANCH" --track "origin/$GITHUB_BRANCH" >/dev/null
+    vw_perf_stage_begin "webdav_upload_readback_verify"
   fi
-else
-  git -C "$REPO_DIR" switch -C "$GITHUB_BRANCH" >/dev/null 2>&1 || git -C "$REPO_DIR" checkout -B "$GITHUB_BRANCH"
-fi
-
-git -C "$REPO_DIR" add -A
-if ! git -C "$REPO_DIR" diff --cached --quiet; then git -C "$REPO_DIR" commit -m "Vaultwarden encrypted backup ${TIMESTAMP}"; fi
-PUSH_OK=0
-for attempt in $(seq 1 "$GIT_PUSH_RETRIES"); do
-  echo "GitHub push attempt ${attempt}/${GIT_PUSH_RETRIES}..."
-  if git -C "$REPO_DIR" push -u origin "$GITHUB_BRANCH"; then PUSH_OK=1; break; fi
-  if (( attempt < GIT_PUSH_RETRIES )); then
-    echo "Push failed; wait ${GIT_RETRY_DELAY}s, refresh remote, and retry..."
-    sleep $((GIT_RETRY_DELAY * attempt))
-    if git -C "$REPO_DIR" fetch origin "+refs/heads/$GITHUB_BRANCH:refs/remotes/origin/$GITHUB_BRANCH"; then
-      git -C "$REPO_DIR" merge --ff-only "origin/$GITHUB_BRANCH" || { FAILURE_REASON="GitHub history diverged during retry"; exit 1; }
+  if try_pending_upload "$target" "$STATE_DIR/pending/$target/$FILENAME"; then
+    if [[ "$target" == github ]]; then
+      REMOTE_VERIFIED_GITHUB=true
+    else
+      REMOTE_VERIFIED_WEBDAV=true
+    fi
+    [[ "$target" != "$UPLOAD_TARGET" ]] || REMOTE_VERIFIED=true
+    vw_perf_stage_end success "$SIZE_BYTES"
+  else
+    vw_perf_stage_end failed "$SIZE_BYTES"
+    if [[ "$target" != "$UPLOAD_TARGET" ]]; then
+      vw_notify failure "Vaultwarden: secondary backup to $target is pending ($FILENAME)." || true
     fi
   fi
 done
-(( PUSH_OK == 1 )) || { FAILURE_REASON="GitHub push failed after ${GIT_PUSH_RETRIES} attempts; local encrypted backup retained"; exit 1; }
-LOCAL_COMMIT=$(git -C "$REPO_DIR" rev-parse "refs/heads/$GITHUB_BRANCH")
-REMOTE_COMMIT=$(git -C "$REPO_DIR" ls-remote origin "refs/heads/$GITHUB_BRANCH" | awk 'NR==1 {print $1}')
-[[ -n "$REMOTE_COMMIT" && "$LOCAL_COMMIT" == "$REMOTE_COMMIT" ]] || { FAILURE_REASON="remote commit verification mismatch"; exit 1; }
-REMOTE_VERIFIED=true
-vw_perf_stage_end success "$SIZE_BYTES"
+if [[ "$REMOTE_VERIFIED" != true ]]; then
+  FAILURE_REASON="primary target $UPLOAD_TARGET was not verified; local ciphertext retained and queued"
+  exit 1
+fi
+if [[ "$UPLOAD_TARGET" == webdav ]]; then
+  python3 "$STORAGE_TOOL" prune-local "$BACKUP_DIR" "$RETENTION_DAYS" --webdav --pending "$STATE_DIR/pending" || echo "WARNING: WebDAV local retention cleanup did not complete."
+else
+  python3 "$STORAGE_TOOL" prune-local "$BACKUP_DIR" "$RETENTION_DAYS" --replica-git "$REPO_DIR" "$(cat "$TMP_ROOT/github-verified-commit")" --pending "$STATE_DIR/pending" || echo "WARNING: GitHub local retention cleanup did not complete."
+fi
+if [[ "$REMOTE_VERIFIED_WEBDAV" == true && "${WEBDAV_RETENTION_DAYS:-0}" != 0 ]]; then
+  python3 "$STORAGE_TOOL" prune-webdav "$BACKUP_DIR" "$WEBDAV_RETENTION_DAYS" "${WEBDAV_MIN_KEEP:-7}" --pending "$STATE_DIR/pending" || echo "WARNING: WebDAV remote retention cleanup did not complete."
 fi
 VW_PERF_ARTIFACT_BYTES="$SIZE_BYTES"
 

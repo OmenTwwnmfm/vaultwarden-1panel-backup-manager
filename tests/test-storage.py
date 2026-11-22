@@ -13,6 +13,7 @@ import threading
 import unittest
 import urllib.parse
 import xml.etree.ElementTree as ET
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -190,7 +191,15 @@ class StorageTests(unittest.TestCase):
         rollback_archive = make_pair(self.directory, rollback_name)
         os.utime(rollback_archive, (100, 100))
         os.utime(Path(str(rollback_archive) + ".sha256"), (100, 100))
-        removed = storage.prune_local(self.directory, 30, now=100 + 31 * 86400)
+        self.assertEqual(storage.prune_local(self.directory, 30, now=100 + 31 * 86400), [])
+        self.assertTrue(old_archive.exists())
+        pending = self.directory / "pending"
+        (pending / "webdav").mkdir(parents=True)
+        marker = pending / "webdav" / old_name
+        marker.touch()
+        self.assertEqual(storage.prune_local(self.directory, 30, now=100 + 31 * 86400, replica=lambda path: path.is_file(), pending=pending), [])
+        marker.unlink()
+        removed = storage.prune_local(self.directory, 30, now=100 + 31 * 86400, replica=lambda path: path.is_file())
         self.assertEqual(removed, [old_name])
         self.assertFalse(old_archive.exists())
         self.assertTrue(kept_archive.exists())
@@ -199,6 +208,29 @@ class StorageTests(unittest.TestCase):
     def test_local_retention_is_skipped_when_remote_upload_fails(self):
         self.assertTrue(self.archive.exists())
         self.assertEqual(storage.prune_local(self.directory, 30, now=100), [])
+
+    def test_signature_rejects_forged_content_and_unknown_signer(self):
+        trust = self.directory / "first-signer"
+        untrusted = self.directory / "second-signer"
+        storage.initialize_signing(trust)
+        storage.initialize_signing(untrusted)
+        with patch.object(storage, "trusted_file", side_effect=lambda path, **kwargs: path.is_file()):
+            with self.assertRaises(storage.MissingSignature):
+                storage.verify_signature(self.archive, trust)
+            storage.sign_backup(self.archive, trust)
+            storage.verify_signature(self.archive, trust)
+            with self.assertRaisesRegex(ValueError, "验证失败"):
+                storage.verify_signature(self.archive, untrusted)
+            signature = Path(str(self.archive) + ".sha256.sig")
+            original_signature = signature.read_bytes()
+            signature.write_bytes(b"invalid signature")
+            with self.assertRaisesRegex(ValueError, "验证失败"):
+                storage.verify_signature(self.archive, trust)
+            signature.write_bytes(original_signature)
+            make_pair(self.directory, NAME, PAYLOAD + b"changed")
+            storage.verify_local(self.archive)
+            with self.assertRaisesRegex(ValueError, "验证失败"):
+                storage.verify_signature(self.archive, trust)
 
     def test_checksum_must_bind_selected_archive(self):
         storage.verify_local(self.archive)
@@ -312,7 +344,7 @@ class WebDAVTests(unittest.TestCase):
         self.assertEqual(self.client.list_archives(), [NAME])
 
     def test_manifest_can_be_listed_and_downloaded_without_archive(self):
-        manifest, checksum = storage.members_for(NAME)[2:]
+        manifest, checksum = storage.members_for(NAME)[2:4]
         payload = b"encrypted manifest" * 400
         make_pair(self.directory, manifest, payload)
         for name in (manifest, checksum):
@@ -335,6 +367,17 @@ class WebDAVTests(unittest.TestCase):
             self.server.files[name] = b"payload"
         self.client.delete_remote(NAME)
         self.assertEqual(set(self.server.files), set(storage.members_for(ROLLBACK)))
+
+    def test_signed_sidecars_roundtrip(self):
+        signature_name = NAME + ".sha256.sig"
+        (self.directory / signature_name).write_bytes(b"signature-fixture")
+        self.client.upload(self.archive)
+        restored = self.directory / "restore"
+        self.client.download(NAME, restored)
+        self.assertEqual((restored / signature_name).read_bytes(), b"signature-fixture")
+        self.server.files[NAME + ".keep"] = b"keep"
+        with self.assertRaisesRegex(ValueError, "保护"):
+            self.client.delete_remote(NAME)
 
     def test_conflicting_remote_file_is_preserved(self):
         self.server.files[NAME] = b"existing different data"

@@ -6,7 +6,7 @@ PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 MANAGER="$PROJECT_DIR/scripts/vw-manager.sh"
 export VBM_PROJECT_ROOT="$PROJECT_DIR"
 
-if [[ ! -t 0 ]]; then
+if [[ ! -t 0 && "${1:-}" != status ]]; then
   echo "错误：请在 SSH 终端或 1Panel 终端中交互式运行。" >&2
   exit 1
 fi
@@ -19,7 +19,7 @@ if [[ "$EUID" -ne 0 ]]; then
   exit 1
 fi
 
-unset VW_CONFIG_FILE VW_LOG_FILE VW_LOCK_FILE VW_STATE_DIR VW_COMMON_LIB VW_MANIFEST_TOOL VW_ARCHIVE_CHECK_TOOL VW_MIN_FREE_MB VW_PERF_FILE VW_PERF_LOCK_FILE VW_DIAG_REPORT_DIR
+unset VW_CONFIG_FILE VW_LOG_FILE VW_LOCK_FILE VW_STATE_DIR VW_COMMON_LIB VW_MANIFEST_TOOL VW_ARCHIVE_CHECK_TOOL VW_STORAGE_TOOL VW_ALLOW_UNSIGNED VW_MIN_FREE_MB VW_PERF_FILE VW_PERF_LOCK_FILE VW_DIAG_REPORT_DIR
 
 check_root_owned_tree() {
   local path="$PROJECT_DIR" owner mode bad_entry
@@ -49,13 +49,15 @@ check_root_owned_tree() {
 
 check_root_owned_tree || exit 1
 
-for required in "$MANAGER" "$PROJECT_DIR/scripts/vw-common.sh" "$PROJECT_DIR/scripts/vw-backup.sh" "$PROJECT_DIR/scripts/vw-restore-prepare.sh" "$PROJECT_DIR/scripts/vw-archive-check.py" "$PROJECT_DIR/scripts/vw-manifest.py" "$PROJECT_DIR/scripts/vw-storage.py" "$PROJECT_DIR/scripts/vw-diagnose.sh" "$PROJECT_DIR/scripts/vw-performance.py" "$PROJECT_DIR/scripts/vbm-launcher.sh"; do
+for required in "$MANAGER" "$PROJECT_DIR/scripts/vw-common.sh" "$PROJECT_DIR/scripts/vw-maintenance.sh" "$PROJECT_DIR/scripts/vw-backup.sh" "$PROJECT_DIR/scripts/vw-restore-prepare.sh" "$PROJECT_DIR/scripts/vw-archive-check.py" "$PROJECT_DIR/scripts/vw-manifest.py" "$PROJECT_DIR/scripts/vw-storage.py" "$PROJECT_DIR/scripts/vw-diagnose.sh" "$PROJECT_DIR/scripts/vw-performance.py" "$PROJECT_DIR/scripts/vbm-launcher.sh"; do
   if [[ ! -f "$required" ]]; then
     echo "错误：项目文件不完整，缺少：$required" >&2
     echo "请从 GitHub 下载/克隆完整项目目录，不要只下载 run.sh。" >&2
     exit 1
   fi
 done
+
+if [[ "${1:-}" == status ]]; then exec bash "$MANAGER" "$@"; fi
 
 # Self-heal the global command. This makes `vbm` available even if the first
 # setup wizard or the previous script-update step did not install it.

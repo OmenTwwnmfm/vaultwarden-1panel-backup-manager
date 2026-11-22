@@ -26,6 +26,7 @@ vw_perf_stage_begin() { return 0; }
 vw_perf_stage_end() { return 0; }
 vw_perf_downtime_begin() { return 0; }
 vw_perf_downtime_end() { return 0; }
+vw_perf_record_event() { return 0; }
 vw_require_free_space() { return 0; }
 vw_notify() { return 0; }
 vw_format_bytes() { printf '%s bytes' "$1"; }
@@ -43,6 +44,12 @@ if [[ $# == 5 ]]; then cat "$5" >> "$4"; else cat >> "$4"; fi
 AGE
 cat > "$TMP/bin/sqlite3" <<'SQLITE'
 #!/usr/bin/env bash
+if [[ "${3:-}" == '.timeout 10000' ]]; then
+  destination="${4#.backup \'}"
+  destination="${destination%\'}"
+  cp -- "$2" "$destination"
+  exit
+fi
 printf 'ok\n'
 SQLITE
 cat > "$TMP/bin/flock" <<'FLOCK'
@@ -54,7 +61,8 @@ cat > "$TMP/bin/python3" <<'PYTHON'
 case "$1" in
   *vw-storage.py)
     case "$2" in
-      list) printf 'preflight\n' >> "$VW_TEST_ROOT/order" ;;
+      check-signing|verify-signature) ;;
+      sign) printf 'mock signature\n' > "$3.sha256.sig" ;;
       upload)
         [[ -s "$3" && -s "$3.sha256" ]] || exit 1
         printf 'upload\n' >> "$VW_TEST_ROOT/order"
@@ -78,7 +86,7 @@ MKTEMP
 chmod +x "$TMP/bin/"*
 PATH="$TMP/bin:$PATH"
 export PATH
-for outcome in success failed; do
+for outcome in success failed online dual; do
   mkdir -p "$TMP/$outcome/backups" "$TMP/$outcome/state"
   : > "$TMP/order"
   {
@@ -87,20 +95,65 @@ for outcome in success failed; do
   } > "$TMP/config"
   export VW_TEST_UPLOAD_FAIL=0
   [[ "$outcome" == success ]] || VW_TEST_UPLOAD_FAIL=1
+  primary=webdav
+  expected_status="$outcome"
+  case "$outcome" in
+    online)
+      printf 'SNAPSHOT_MODE=online\n' >> "$TMP/config"
+      VW_TEST_UPLOAD_FAIL=0
+      expected_status=success
+      ;;
+    dual)
+      dual_repo="$TMP/dual/git-worktree"
+      dual_remote="$TMP/dual/remote.git"
+      git init --quiet --bare --initial-branch=main "$dual_remote"
+      git init --quiet --initial-branch=main "$dual_repo"
+      git -C "$dual_repo" config user.name Tester
+      git -C "$dual_repo" config user.email test@example.invalid
+      git -C "$dual_repo" remote add origin "$dual_remote"
+      touch "$TMP/dual/deploy-key"
+      dual_origin=$(git -C "$dual_repo" remote get-url origin)
+      printf 'GITHUB_REPO=%q\nREPO_DIR=%q\nGITHUB_SSH_KEY=%q\nGITHUB_BRANCH=main\nSECONDARY_TARGET=webdav\n' "$dual_origin" "$dual_repo" "$TMP/dual/deploy-key" >> "$TMP/config"
+      primary=github
+      expected_status=success
+      ;;
+  esac
   result=0
   VW_CONFIG_FILE="$TMP/config" VW_COMMON_LIB="$TMP/common.sh" \
   VW_MANIFEST_TOOL="$ROOT/scripts/vw-manifest.py" VW_STATE_DIR="$TMP/$outcome/state" \
   VW_LOG_FILE="$TMP/$outcome/log" VW_LOCK_FILE="$TMP/operation.lock" \
-  VW_RUN_ID="webdav-$outcome" bash "$ROOT/scripts/vw-backup.sh" webdav || result=$?
-  [[ "$outcome" != success || "$result" == 0 ]] || { cat "$TMP/$outcome/log"; exit 1; }
-  [[ "$outcome" != failed || "$result" != 0 ]] || exit 1
-  grep -Fxq "STATUS=$outcome" "$TMP/$outcome/state/last-result.env"
-  grep -Fxq 'BACKUP_TARGET=webdav' "$TMP/$outcome/state/last-result.env"
+  VW_RUN_ID="webdav-$outcome" bash "$ROOT/scripts/vw-backup.sh" "$primary" || result=$?
+  [[ "$expected_status" != success || "$result" == 0 ]] || { cat "$TMP/$outcome/log"; exit 1; }
+  [[ "$expected_status" != failed || "$result" != 0 ]] || exit 1
+  grep -Fxq "STATUS=$expected_status" "$TMP/$outcome/state/last-result.env"
+  grep -Fxq "BACKUP_TARGET=$primary" "$TMP/$outcome/state/last-result.env"
   grep -Fxq 'SERVICE_RESTORED=true' "$TMP/$outcome/state/last-result.env"
   expected_remote=true
-  [[ "$outcome" == success ]] || expected_remote=false
+  [[ "$expected_status" == success ]] || expected_remote=false
   grep -Fxq "REMOTE_VERIFIED=$expected_remote" "$TMP/$outcome/state/last-result.env"
-  [[ "$(find "$TMP/$outcome/backups" -type f | wc -l)" -eq 4 ]]
-  [[ "$(tr '\n' ' ' < "$TMP/order")" == 'preflight stop start healthy upload ' ]]
+  [[ "$(find "$TMP/$outcome/backups" -type f | wc -l)" -eq 6 ]]
+  if [[ "$outcome" == online ]]; then
+    [[ "$(tr '\n' ' ' < "$TMP/order")" == 'healthy upload ' ]]
+  else
+    [[ "$(tr '\n' ' ' < "$TMP/order")" == 'stop start healthy upload ' ]]
+  fi
+  if [[ "$outcome" == failed || "$outcome" == dual ]]; then
+    compgen -G "$TMP/$outcome/state/pending/webdav/vw-*.tar.gz.age" >/dev/null
+  else
+    [[ -z "$(find "$TMP/$outcome/state/pending" -type f -print)" ]]
+  fi
+  if [[ "$outcome" == dual ]]; then
+    grep -Fxq 'REMOTE_VERIFIED_GITHUB=true' "$TMP/dual/state/last-result.env"
+    grep -Fxq 'REMOTE_VERIFIED_WEBDAV=false' "$TMP/dual/state/last-result.env"
+    [[ "$(git -C "$dual_remote" ls-tree --name-only main | wc -l)" -eq 6 ]]
+    sleep 1
+    : > "$TMP/order"
+    VW_TEST_UPLOAD_FAIL=0 VW_CONFIG_FILE="$TMP/config" VW_COMMON_LIB="$TMP/common.sh" \
+    VW_MANIFEST_TOOL="$ROOT/scripts/vw-manifest.py" VW_STATE_DIR="$TMP/dual/state" \
+    VW_LOG_FILE="$TMP/dual/retry.log" VW_LOCK_FILE="$TMP/operation.lock" \
+    VW_RUN_ID=dual-retry bash "$ROOT/scripts/vw-backup.sh" github || { cat "$TMP/dual/retry.log"; exit 1; }
+    [[ "$(tr '\n' ' ' < "$TMP/order")" == 'upload stop start healthy upload ' ]]
+    [[ -z "$(find "$TMP/dual/state/pending" -type f -print)" ]]
+  fi
 done
 echo "PASS: WebDAV worker needs no GitHub credentials, restores service before upload, and retains snapshots on failure"

@@ -18,6 +18,7 @@ id_rsa
 *.tar.gz.age
 *.age
 *.age.sha256
+*.age.sha256.sig
 *.sha256
 backups/
 restore-staging/

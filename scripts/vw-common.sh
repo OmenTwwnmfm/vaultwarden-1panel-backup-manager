@@ -71,7 +71,11 @@ vw_find_target() {
     image=$(docker inspect -f '{{.Config.Image}}' "$id" 2>/dev/null) || continue
     status=$(docker inspect -f '{{.State.Status}}' "$id" 2>/dev/null) || continue
     lower="${name,,} ${image,,}"
-    [[ "$lower" == *vaultwarden* || "$lower" == *bitwarden* ]] || continue
+    if [[ -n "${CONTAINER_MATCH:-}" ]]; then
+      [[ "$lower" == *"${CONTAINER_MATCH,,}"* ]] || continue
+    else
+      [[ "$lower" == *vaultwarden* || "$lower" == *bitwarden* ]] || continue
+    fi
     [[ "$require_running" != true || "$status" == running ]] || continue
     source=$(docker inspect "$id" --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{"\n"}}{{end}}{{end}}' 2>/dev/null | sed '/^[[:space:]]*$/d')
     [[ -n "$source" && "$source" != *$'\n'* ]] || continue
@@ -122,7 +126,7 @@ vw_save_config() {
   [[ ! -L "$CONFIG_FILE" ]] || return 1
   tmp=$(mktemp "${CONFIG_FILE}.XXXXXX") || return 1
   {
-    for var in CONTAINER DATA_DIR AGE_RECIPIENT GITHUB_REPO GITHUB_BRANCH GITHUB_SSH_KEY BACKUP_DIR REPO_DIR RETENTION_DAYS MAX_FILE_MIB AGE_IDENTITY_DEFAULT SYSTEMD_TIME BACKUP_FREQUENCY MIN_FREE_MB GIT_PUSH_RETRIES GIT_RETRY_DELAY NOTIFY_METHOD TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID NTFY_URL NTFY_TOKEN WEBHOOK_URL NOTIFY_ON_SUCCESS NOTIFY_ON_FAILURE BACKUP_TARGET; do
+    for var in CONTAINER DATA_DIR AGE_RECIPIENT GITHUB_REPO GITHUB_BRANCH GITHUB_SSH_KEY BACKUP_DIR REPO_DIR RETENTION_DAYS MAX_FILE_MIB AGE_IDENTITY_DEFAULT SYSTEMD_TIME BACKUP_FREQUENCY MIN_FREE_MB GIT_PUSH_RETRIES GIT_RETRY_DELAY NOTIFY_METHOD TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID NTFY_URL NTFY_TOKEN WEBHOOK_URL NOTIFY_ON_SUCCESS NOTIFY_ON_FAILURE BACKUP_TARGET PRIMARY_TARGET SECONDARY_TARGET UPDATE_CHANNEL SNAPSHOT_MODE WEBDAV_RETENTION_DAYS WEBDAV_MIN_KEEP ALERT_MAX_BACKUP_AGE_HOURS ALERT_MAX_DRILL_AGE_DAYS CONTAINER_MATCH; do
       printf '%s=%q\n' "$var" "${!var-}"
     done
   } > "$tmp"

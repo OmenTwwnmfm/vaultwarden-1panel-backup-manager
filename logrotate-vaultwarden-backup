@@ -8,3 +8,11 @@
     create 0600 root root
     copytruncate
 }
+/var/lib/vaultwarden-backup/performance.tsv {
+    monthly
+    rotate 6
+    compress
+    missingok
+    notifempty
+    create 0600 root root
+}

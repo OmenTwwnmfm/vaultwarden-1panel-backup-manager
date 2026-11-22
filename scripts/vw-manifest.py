@@ -9,8 +9,12 @@ if len(sys.argv) != 3:
     print("usage: vw-manifest.py CONTAINER OUTPUT.json", file=sys.stderr)
     raise SystemExit(2)
 container, output = sys.argv[1:]
-raw = subprocess.check_output(["docker", "inspect", container], text=True)
-obj = json.loads(raw)[0]
+try:
+    raw = subprocess.check_output(["docker", "inspect", "--type", "container", "--", container], text=True, stderr=subprocess.DEVNULL)
+    obj = json.loads(raw)[0]
+except (OSError, subprocess.CalledProcessError, ValueError, IndexError):
+    print("无法读取 Vaultwarden 容器配置，请确认容器仍在 Docker 中。", file=sys.stderr)
+    raise SystemExit(1)
 config = obj.get("Config") or {}
 host = obj.get("HostConfig") or {}
 state = obj.get("State") or {}
@@ -21,7 +25,6 @@ safe_env = {
     "EMERGENCY_ACCESS_ALLOWED", "ORG_GROUPS_ENABLED", "PUSH_ENABLED",
     "WEBSOCKET_ENABLED", "TZ", "LOG_LEVEL", "EXTENDED_LOGGING",
 }
-secret_markers = ("TOKEN", "PASSWORD", "SECRET", "KEY", "SMTP", "S3", "DATABASE_URL")
 env_values = {}
 redacted_names = []
 for item in config.get("Env") or []:
@@ -30,8 +33,6 @@ for item in config.get("Env") or []:
     key, value = item.split("=", 1)
     if key in safe_env:
         env_values[key] = value
-    elif any(marker in key.upper() for marker in secret_markers):
-        redacted_names.append(key)
     else:
         # Record variable names only; arbitrary values may contain secrets.
         redacted_names.append(key)

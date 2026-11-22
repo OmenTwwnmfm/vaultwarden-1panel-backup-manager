@@ -17,7 +17,12 @@ OUT="$REPORT_DIR/diagnosis-${STAMP}-$$.txt"
 # could race with tee creating the file and fail with ENOENT.
 : > "$OUT"
 chmod 600 "$OUT"
-exec > >(tee -a "$OUT") 2>&1
+exec > >(
+  sed -u -E \
+    -e 's#(https?|webdavs?)://[^[:space:]<>]+#[URL REDACTED]#gI' \
+    -e 's/(authorization|password|passwd|token|secret)[[:space:]]*[:=].*/\1=[REDACTED]/gI' |
+    tee -a "$OUT"
+) 2>&1
 echo "Vaultwarden Backup Manager diagnostic report"
 echo "Generated: $(date '+%F %T %Z')"
 echo "Host: $(hostname)"
@@ -86,3 +91,4 @@ if [[ -f /var/lib/vaultwarden-backup/performance.tsv ]]; then
   echo; echo "Recent performance records (last 20 rows):"
   tail -n 20 /var/lib/vaultwarden-backup/performance.tsv || true
 fi
+echo "分享诊断报告前，请检查并移除主机名、路径和其他敏感信息。"

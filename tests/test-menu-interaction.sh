@@ -148,6 +148,7 @@ grep -Fq '本地校验：通过 · 服务恢复：通过 · 远端核验：未�
 
 require_root() { return 0; }
 require_tty() { return 0; }
+warn_if_helpers_stale() { return 0; }
 clear() { printf 'clear\n' >> "$TMP/events"; }
 restore_rehearsal() {
   printf 'result\n' >> "$TMP/events"
@@ -159,6 +160,14 @@ for rehearsal_status in 0 1; do
   : > "$TMP/events"
   (VBM_SKIP_UPDATE_CHECK=1 main_menu) <<< $'09\n\n00' >/dev/null
   [[ "$(cat "$TMP/events")" == $'clear\nresult\npause\nclear' ]]
+done
+
+dispatch=$(sed -n '/^main_menu() {/,/^}/p' "$ROOT/scripts/vw-manager.sh")
+handlers=(configure_wizard manual_backup_menu check_configuration show_logs verify_github_backup view_deployment_manifest performance_monitor restore_from_github restore_rehearsal manage_backup_history manage_local_backups configure_webdav upload_local_webdav install_systemd_timer systemd_timer_status pause_systemd_timer resume_systemd_timer configure_notifications preupgrade_backup generate_diagnostics configure_backup_policy update_installed_scripts check_for_project_updates)
+for index in "${!handlers[@]}"; do
+  number=$((index + 1))
+  if ((number < 10)); then number="$number|0$number"; fi
+  grep -Fq "      $number) ${handlers[$index]}" <<< "$dispatch"
 done
 
 echo 'PASS: WebDAV deletes by group index and rehearsal pauses once before clearing the result'

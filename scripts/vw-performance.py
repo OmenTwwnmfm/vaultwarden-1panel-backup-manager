@@ -97,7 +97,10 @@ def main():
     if args.csv:
         out = Path(args.csv)
         out.parent.mkdir(parents=True, exist_ok=True)
-        with out.open("w", encoding="utf-8-sig", newline="") as fh:
+        if out.exists() or out.is_symlink():
+            print("CSV 已存在，请选择其他路径。", file=sys.stderr)
+            return 1
+        with out.open("x", encoding="utf-8-sig", newline="") as fh:
             writer = csv.DictWriter(fh, fieldnames=FIELDS)
             writer.writeheader()
             writer.writerows(rows)

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import gzip
 import io
+import os
 import subprocess
 import sys
 import tarfile
@@ -35,6 +37,7 @@ def check(payload: bytes) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=False,
         check=False,
+        timeout=30,
     )
 
 
@@ -68,6 +71,23 @@ def main() -> int:
     setuid.mode = 0o4755
     result = check(make_archive([setuid]))
     assert result.returncode != 0 and b"setuid/setgid" in result.stderr
+
+    result = check(make_archive([file_entry("dir/file"), file_entry("dir")]))
+    assert result.returncode != 0 and b"replaces a directory" in result.stderr
+    result = check(make_archive([file_entry("dir"), file_entry("dir/file")]))
+    assert result.returncode != 0 and b"nested under" in result.stderr
+    assert check(make_archive([file_entry("line\nbreak")])).returncode != 0
+    damaged = bytearray(valid)
+    damaged[-8] ^= 1
+    assert check(damaged).returncode != 0
+    with_trailing_data = gzip.compress(gzip.decompress(valid) + os.urandom(1024 * 1024))
+    assert check(with_trailing_data).returncode == 0
+    damaged_tail = bytearray(with_trailing_data)
+    damaged_tail[-8] ^= 1
+    assert check(damaged_tail).returncode != 0
+    large = make_archive([file_entry(f"attachments/file-{index}", b"x") for index in range(15000)])
+    result = check(large)
+    assert result.returncode == 0 and result.stdout.strip() == b"15000", result.stderr
 
     print("PASS: archive validator accepts normal data and totals extracted bytes")
     print("PASS: archive validator rejects traversal, links, duplicate paths, and setuid modes")
