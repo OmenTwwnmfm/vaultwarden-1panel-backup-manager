@@ -11,6 +11,35 @@ MANIFEST_TOOL="${VW_MANIFEST_TOOL:-/usr/local/libexec/vw-manifest.py}"
 STORAGE_TOOL="$(dirname -- "${BASH_SOURCE[0]}")/vw-storage.py"
 [[ -f "$STORAGE_TOOL" ]] || STORAGE_TOOL="/usr/local/libexec/vw-storage.py"
 STATE_DIR="${VW_STATE_DIR:-/var/lib/vaultwarden-backup}"
+# Trust anchor (root only): the VW_* overrides above stay available so the
+# manager and tests can relocate paths, but when this worker runs as root
+# the code it is about to load must be root-owned and not writable by
+# group/other users, and the log/lock/state paths must not be symlinks.
+# Without this, a crafted environment could redirect code execution.
+if (( EUID == 0 )); then
+  code_file_trusted() {
+    [[ -f "$1" && ! -L "$1" && "$(stat -c '%u' -- "$1")" == 0 ]] && (( (8#$(stat -c '%a' -- "$1") & 022) == 0 ))
+  }
+  # The common library is sourced below, so it must exist and be trusted.
+  if ! code_file_trusted "$COMMON_LIB"; then
+    echo "ERROR: Refusing to load a code file that is not root-owned and locked down: $COMMON_LIB" >&2
+    exit 1
+  fi
+  # Tools run later in the flow: when present they must be trusted too.
+  # A missing tool keeps the existing later "missing tool" error path.
+  for code_file in "$MANIFEST_TOOL" "$STORAGE_TOOL"; do
+    if [[ -e "$code_file" || -L "$code_file" ]] && ! code_file_trusted "$code_file"; then
+      echo "ERROR: Refusing to load a code file that is not root-owned and locked down: $code_file" >&2
+      exit 1
+    fi
+  done
+  for link_path in "$LOG_FILE" "$LOCK_FILE" "$STATE_DIR"; do
+    if [[ -L "$link_path" ]]; then
+      echo "ERROR: Refusing symlink path: $link_path" >&2
+      exit 1
+    fi
+  done
+fi
 mkdir -p "$(dirname "$LOG_FILE")" "$(dirname "$LOCK_FILE")" "$STATE_DIR"
 touch "$LOG_FILE"; chmod 600 "$LOG_FILE"; chmod 700 "$STATE_DIR"
 exec >>"$LOG_FILE" 2>&1
@@ -294,7 +323,8 @@ upload_snapshot() (
   git -C "$REPO_DIR" diff --cached --quiet || return 1
   local -a members=()
   for member in "$archive" "$archive.sha256" "$archive.sha256.sig" "$manifest" "$manifest.sha256" "$manifest.sha256.sig"; do
-    local destination="$REPO_DIR/$(basename -- "$member")"
+    local destination
+    destination="$REPO_DIR/$(basename -- "$member")"
     if [[ -e "$destination" || -L "$destination" ]]; then
       [[ -f "$destination" && ! -L "$destination" ]] && cmp -s -- "$member" "$destination" || return 1
     else
@@ -543,6 +573,7 @@ fi
 if [[ "$REMOTE_VERIFIED_WEBDAV" == true && "${WEBDAV_RETENTION_DAYS:-0}" != 0 ]]; then
   python3 "$STORAGE_TOOL" prune-webdav "$BACKUP_DIR" "$WEBDAV_RETENTION_DAYS" "${WEBDAV_MIN_KEEP:-7}" --pending "$STATE_DIR/pending" || echo "WARNING: WebDAV remote retention cleanup did not complete."
 fi
+# shellcheck disable=SC2034 # 由 vw-common.sh 的 vw_perf_append_row 跨文件读取
 VW_PERF_ARTIFACT_BYTES="$SIZE_BYTES"
 
 FINAL_STATUS="success"; FAILURE_REASON=""

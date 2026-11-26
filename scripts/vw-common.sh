@@ -21,6 +21,8 @@ vw_require_secure_config() {
   mode=$(stat -c '%a' -- "$file") || return 1
   if [[ "$mode" != 600 ]]; then
     chmod 600 -- "$file" || { vw_error "无法收紧配置文件权限：$file"; return 1; }
+    vw_error "警告：配置文件权限原本过宽（$mode），已自动收紧为 600：$file"
+    vw_error "该文件包含通知令牌等凭据；若它曾以宽松权限存放过，请按凭据可能已暴露处理并轮换相关令牌。"
   fi
   [[ "$(stat -c '%a' -- "$file")" == 600 ]]
 }
@@ -256,7 +258,7 @@ vw_wait_healthy() {
   # We execute the exact same probe twice, two seconds apart, and keep a hard
   # timeout. The Docker healthcheck itself remains enabled and unchanged.
   local container="$1" timeout_s="${2:-120}" delay_s="${3:-2}" required="${4:-2}"
-  local health_test state health start_ms now_ms probe_start probe_end
+  local health_test state health start_ms now_ms probe_end
   local successes=0 previous_success_ms=0 last_probe_rc=1
   local native_start native_end native_elapsed
   [[ "$timeout_s" =~ ^[0-9]+$ ]] && (( timeout_s >= 1 )) || timeout_s=120
@@ -271,7 +273,6 @@ vw_wait_healthy() {
     while :; do
       state=$(docker inspect -f '{{.State.Status}}' "$container" 2>/dev/null || echo missing)
       if [[ "$state" == running ]]; then
-        probe_start=$(vw_perf_now_ms)
         if timeout --signal=TERM --kill-after=2s 12s docker exec "$container" /healthcheck.sh >/dev/null 2>&1; then
           probe_end=$(vw_perf_now_ms)
           last_probe_rc=0

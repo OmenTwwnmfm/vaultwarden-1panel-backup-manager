@@ -64,6 +64,9 @@ def read_rows(path: Path):
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
         for row in reader:
+            # Normalize to the known fields so a damaged or hand-edited
+            # header cannot make later row["..."] accesses raise KeyError.
+            row = {field: (row.get(field) or "") for field in FIELDS}
             try:
                 row["duration_ms"] = int(row.get("duration_ms") or 0)
                 row["bytes"] = int(row.get("bytes") or 0)

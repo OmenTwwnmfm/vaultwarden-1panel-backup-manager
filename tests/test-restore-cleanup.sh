@@ -32,7 +32,8 @@ cat > "$TMP/bin/python3" <<'PYTHON'
 #!/usr/bin/env bash
 exec python "$@"
 PYTHON
-export VW_TEST_REAL_TAR="$(command -v tar)" PYTHONUTF8=1
+VW_TEST_REAL_TAR="$(command -v tar)"
+export VW_TEST_REAL_TAR PYTHONUTF8=1
 chmod +x "$TMP/bin/"*
 export PATH="$TMP/bin:$PATH"
 for scenario in tar sqlite term interrupt success; do

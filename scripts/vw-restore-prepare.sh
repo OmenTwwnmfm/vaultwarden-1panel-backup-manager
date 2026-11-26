@@ -44,10 +44,18 @@ if [[ -e "$STAGING" || -L "$STAGING" || "$STAGING" == */ ]]; then
 fi
 STAGING=$(readlink -m -- "$STAGING")
 [[ "$STAGING" != / && -d "$(dirname -- "$STAGING")" ]] || exit 1
-if [[ -e /etc/vaultwarden-backup.conf && $EUID == 0 ]]; then
+if [[ -e /etc/vaultwarden-backup.conf ]]; then
   DATA_DIR="" BACKUP_DIR=""
-  [[ ! -L /etc/vaultwarden-backup.conf && "$(stat -c '%u:%a' /etc/vaultwarden-backup.conf)" == 0:600 ]] || exit 1
-  source /etc/vaultwarden-backup.conf
+  if (( EUID == 0 )); then
+    [[ ! -L /etc/vaultwarden-backup.conf && "$(stat -c '%u:%a' /etc/vaultwarden-backup.conf)" == 0:600 ]] || exit 1
+    source /etc/vaultwarden-backup.conf
+  else
+    # Standalone non-root runs never source the config (it is code). Extract
+    # only plain absolute DATA_DIR/BACKUP_DIR values so the production
+    # overlap guard below still applies; quoted/escaped values are ignored.
+    DATA_DIR=$(sed -n 's/^DATA_DIR=\(\/[A-Za-z0-9._/-]*\)$/\1/p' /etc/vaultwarden-backup.conf 2>/dev/null | head -n 1) || DATA_DIR=""
+    BACKUP_DIR=$(sed -n 's/^BACKUP_DIR=\(\/[A-Za-z0-9._/-]*\)$/\1/p' /etc/vaultwarden-backup.conf 2>/dev/null | head -n 1) || BACKUP_DIR=""
+  fi
   for protected_dir in "$DATA_DIR" "$BACKUP_DIR"; do
     [[ -n "$protected_dir" ]] || continue
     protected_dir=$(readlink -m -- "$protected_dir")

@@ -10,8 +10,9 @@
 ![Panel](https://img.shields.io/badge/panel-1Panel-1677ff)
 ![Encryption](https://img.shields.io/badge/encryption-age-16a34a)
 ![Scheduler](https://img.shields.io/badge/scheduler-systemd-6d28d9)
-![Version](https://img.shields.io/badge/version-1.5.0-blue)
+![Version](https://img.shields.io/badge/version-1.5.1-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
+![Tests](https://github.com/OmenTwwnmfm/vaultwarden-1panel-backup-manager/actions/workflows/ci.yml/badge.svg)
 
 </div>
 
@@ -23,7 +24,19 @@ Vaultwarden 将用户密码库保存在自己的服务器上，因此需要可�
 
 项目重点不是再部署一套 Vaultwarden，而是保护已经由 1Panel 管理的现有实例。1Panel 继续负责应用安装、Docker、域名、HTTPS 证书和反向代理；本项目负责数据备份、校验、通知、历史管理和灾难恢复。
 
+兄弟项目 [vaultwarden-1panel-hardening-manager](https://github.com/OmenTwwnmfm/vaultwarden-1panel-hardening-manager)（`vhm`）管「门锁不坏」：安全体检、SSH 双因素、Fail2Ban、防火墙和变更回滚；本项目管「数据不丢」。建议先用 vhm 加固，再用本项目备份。
+
 > **源码仓库与备份存储必须分离。** 本仓库仅放项目代码和文档。GitHub 备份目标须使用独立 Private 仓库，WebDAV 须使用专用目录。不要把数据库、附件、age 私钥、SSH 私钥、WebDAV 凭据、真实配置或其他秘密提交到源码仓库。
+
+## 先跑起来（3 分钟）
+
+```bash
+sudo git clone https://github.com/OmenTwwnmfm/vaultwarden-1panel-backup-manager.git /opt/vaultwarden-1panel-backup-manager
+cd /opt/vaultwarden-1panel-backup-manager
+sudo bash ./run.sh
+```
+
+启动后先选 `[01]` 完成首次配置（识别容器与 `/data` 路径、设置 age 公钥和备份目标），再选 `[02]` 做第一次手动备份。之后在任意目录执行 `vbm` 即可进入菜单。完整步骤见 [快速开始](docs/快速开始.md) 和下方「快速开始」章节。
 
 ## 操作确认输入
 
@@ -313,6 +326,7 @@ tail -n 100 /var/log/vaultwarden-backup.log
 - GitHub 源码仓库与备份仓库必须分开。
 - age 私钥必须离线保存；私钥丢失后，加密备份无法恢复。
 - 管理器需要从 root 所有且不可由普通用户修改的项目目录运行；推荐按照快速开始安装到 `/opt`，不要从普通用户可写的目录以 root 启动。
+- 备份工作器以 root 运行时会校验所加载代码文件（公共库与 Python 工具）的属主和权限，并拒绝符号链接的日志、锁与状态路径；`VW_*` 环境变量只能把路径重定位到同样受 root 保护的位置，不能把代码执行重定向到不可信文件。
 - GitHub SSH Deploy Key 与 age 密钥用途不同；SSH 密钥泄露不等于可以解密 age 备份，但可能允许访问仓库。
 - 不要将真实 `/etc/vaultwarden-backup.conf`、私钥、Token、数据库、附件或 `.age` 文件提交到源码仓库。
 - 恢复操作具有破坏性，必须逐项核对实例和路径；测试环境演练优先于直接在生产环境首次恢复。
@@ -322,11 +336,31 @@ tail -n 100 /var/log/vaultwarden-backup.log
 
 欢迎提交 Issue 或 Pull Request。涉及备份、加密、恢复和容器启停的修改，请同时提供：Bash 语法检查、模拟 Docker/Git/age 测试结果，以及对生产数据安全边界的说明。不要在 Issue 中上传真实数据库、加密备份、私钥或日志中的 Token。
 
+## 开发与测试
+
+CI 在每次推送和 Pull Request 时运行（见仓库 Actions 中的 Tests 工作流）。本地可用同样的命令验证：
+
+```bash
+# Shell 语法与静态检查
+for script in run.sh scripts/*.sh tests/*.sh; do bash -n "$script"; done
+shellcheck --severity=error run.sh scripts/*.sh tests/*.sh
+
+# 全部测试
+for test in tests/*.sh; do bash "$test"; done
+python3 -B tests/test-archive-check.py
+python3 -B tests/test-storage.py
+```
+
+提交涉及备份、加密、恢复和容器启停的修改前，请先在本地跑通全部测试。
+
 ## 文档
 
 - [快速开始](docs/快速开始.md)
 - [完整使用手册](docs/完整使用手册.md)
 - [部署信息记录模板](docs/部署信息记录模板.md)
+- [恢复演练记录模板](docs/恢复演练记录模板.md)
+- [支持矩阵](docs/支持矩阵.md)
+- [路线图](ROADMAP.md)
 
 ## 性能数据
 

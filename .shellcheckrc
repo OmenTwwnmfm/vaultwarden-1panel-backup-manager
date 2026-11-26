@@ -1,0 +1,5 @@
+# shellcheck 全局配置（CI 与本地共用）
+# SC2015：「A && B || { 失败处理 }」是有意的写法，失败分支只处理 A 或 B 失败
+# SC2317：菜单处理函数经分发逻辑间接调用，静态检查会误报不可达
+# SC1091：/etc/vaultwarden-backup.conf 等文件只在目标主机存在
+disable=SC2015,SC2317,SC1091

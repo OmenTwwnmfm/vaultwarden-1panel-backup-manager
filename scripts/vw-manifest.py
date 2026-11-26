@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Create a sanitized, non-secret deployment manifest from docker inspect."""
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -12,7 +13,7 @@ container, output = sys.argv[1:]
 try:
     raw = subprocess.check_output(["docker", "inspect", "--type", "container", "--", container], text=True, stderr=subprocess.DEVNULL)
     obj = json.loads(raw)[0]
-except (OSError, subprocess.CalledProcessError, ValueError, IndexError):
+except (OSError, subprocess.CalledProcessError, ValueError, IndexError, KeyError, AttributeError, TypeError):
     print("无法读取 Vaultwarden 容器配置，请确认容器仍在 Docker 中。", file=sys.stderr)
     raise SystemExit(1)
 config = obj.get("Config") or {}
@@ -80,5 +81,6 @@ manifest = {
         "Recreate domain, HTTPS, SMTP and other secrets manually in 1Panel; this manifest intentionally does not contain secret values.",
     ],
 }
-with open(output, "w", encoding="utf-8") as f:
+fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as f:
     json.dump(manifest, f, ensure_ascii=False, indent=2)

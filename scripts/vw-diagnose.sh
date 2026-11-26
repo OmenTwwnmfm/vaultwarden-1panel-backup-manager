@@ -20,7 +20,9 @@ chmod 600 "$OUT"
 exec > >(
   sed -u -E \
     -e 's#(https?|webdavs?)://[^[:space:]<>]+#[URL REDACTED]#gI' \
-    -e 's/(authorization|password|passwd|token|secret)[[:space:]]*[:=].*/\1=[REDACTED]/gI' |
+    -e 's/(authorization|password|passwd|token|secret)[[:space:]]*[:=].*/\1=[REDACTED]/gI' \
+    -e 's/("(authorization|password|passwd|token|secret|api[-_]?key)"[[:space:]]*:[[:space:]]*")[^"]*"/\1[REDACTED]"/gI' \
+    -e 's/(bearer)[[:space:]]+[^[:space:]]+/\1 [REDACTED]/gI' |
     tee -a "$OUT"
 ) 2>&1
 echo "Vaultwarden Backup Manager diagnostic report"

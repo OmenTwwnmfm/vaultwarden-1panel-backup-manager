@@ -5,7 +5,7 @@ set -Eeuo pipefail
 umask 077
 unset VW_CONFIG_FILE VW_LOG_FILE VW_LOCK_FILE VW_STATE_DIR VW_COMMON_LIB VW_MANIFEST_TOOL VW_ARCHIVE_CHECK_TOOL VW_MIN_FREE_MB VW_PERF_FILE VW_PERF_LOCK_FILE VW_DIAG_REPORT_DIR
 
-VERSION="1.5.0"
+VERSION="1.5.1"
 CONFIG_FILE="/etc/vaultwarden-backup.conf"
 BACKUP_SCRIPT="/usr/local/sbin/vw-backup.sh"
 RESTORE_SCRIPT="/usr/local/sbin/vw-restore-prepare.sh"
@@ -29,6 +29,7 @@ STORAGE_TOOL="$SCRIPT_DIR/vw-storage.py"
 [[ -f "$STORAGE_TOOL" ]] || STORAGE_TOOL="/usr/local/libexec/vw-storage.py"
 MAINTENANCE_LIB="$SCRIPT_DIR/vw-maintenance.sh"
 [[ -f "$MAINTENANCE_LIB" ]] || MAINTENANCE_LIB="/usr/local/libexec/vw-maintenance.sh"
+# shellcheck disable=SC1090 # 路径带回退逻辑，故意动态 source
 source "$MAINTENANCE_LIB"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
@@ -323,7 +324,7 @@ init_or_clone_backup_repo() {
 write_config() {
   local container="$1" data_dir="$2" age_recipient="$3" github_repo="$4" branch="$5" ssh_key="$6" backup_dir="$7" repo_dir="$8" retention="$9" max_mib="${10}" identity_default="${11}"
   local tmp
-  tmp=$(mktemp)
+  tmp=$(mktemp "${CONFIG_FILE}.XXXXXX")
   {
     printf 'CONTAINER=%q\n' "$container"
     printf 'DATA_DIR=%q\n' "$data_dir"
@@ -626,6 +627,7 @@ check_configuration() {
     warn "检测到 1Panel 可能重建过容器，正在更新记录。"
     CONTAINER="$VW_DETECTED_CONTAINER"
     DATA_DIR="$VW_DETECTED_DATA_DIR"
+    # shellcheck disable=SC2153 # AGE_RECIPIENT 等变量由 load_config 从配置文件载入
     write_config "$CONTAINER" "$DATA_DIR" "$AGE_RECIPIENT" "$GITHUB_REPO" "$GITHUB_BRANCH" "$GITHUB_SSH_KEY" "$BACKUP_DIR" "${REPO_DIR:-}" "$RETENTION_DAYS" "$MAX_FILE_MIB" "${AGE_IDENTITY_DEFAULT:-/root/vw-age-identity.txt}" || return 1
   fi
   printf '当前容器：%s\n镜像：%s\n状态：%s\n/data 主机目录：%s\n' \
@@ -892,6 +894,7 @@ restore_from_github() (
           vw_perf_stage_begin "cleanup_health_check_wait"
           if vw_wait_healthy "$container" 120 2 2; then
             vw_perf_stage_end aggregate
+            # shellcheck disable=SC2034 # 经运行结果文件跨文件传递，供状态汇总读取
             SERVICE_RESTORED=true
             vw_perf_downtime_end aggregate
             echo "安全清理：Vaultwarden 已重新启动并通过主动健康探测：$container"
@@ -1189,6 +1192,7 @@ restore_from_github() (
           vw_perf_stage_begin "restore_rollback_health_wait"
           if vw_wait_healthy "$container" 120 2 2; then
             vw_perf_stage_end aggregate
+            # shellcheck disable=SC2034 # 经运行结果文件跨文件传递，供状态汇总读取
             SERVICE_RESTORED=true
             vw_perf_downtime_end aggregate
             warn "已自动回滚到恢复前数据并成功启动。原回滚文件仍保留：$rollback_archive"
@@ -1752,7 +1756,8 @@ performance_monitor() {
         pause
         ;;
       4)
-        local out="/var/backups/vaultwarden/performance-$(date +%Y%m%d-%H%M%S).csv"
+        local out
+        out="${BACKUP_DIR:-/var/backups/vaultwarden}/performance-$(date +%Y%m%d-%H%M%S).csv"
         mkdir -p "$(dirname "$out")"; chmod 700 "$(dirname "$out")"
         python3 "$tool" "$perf_file" --csv "$out"
         chmod 600 "$out" 2>/dev/null || true
