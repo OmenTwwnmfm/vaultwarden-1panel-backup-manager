@@ -5,7 +5,7 @@ set -Eeuo pipefail
 umask 077
 unset VW_CONFIG_FILE VW_LOG_FILE VW_LOCK_FILE VW_STATE_DIR VW_COMMON_LIB VW_MANIFEST_TOOL VW_ARCHIVE_CHECK_TOOL VW_MIN_FREE_MB VW_PERF_FILE VW_PERF_LOCK_FILE VW_DIAG_REPORT_DIR
 
-VERSION="1.5.1"
+VERSION="1.5.2"
 CONFIG_FILE="/etc/vaultwarden-backup.conf"
 BACKUP_SCRIPT="/usr/local/sbin/vw-backup.sh"
 RESTORE_SCRIPT="/usr/local/sbin/vw-restore-prepare.sh"
@@ -212,6 +212,13 @@ load_config() {
   NOTIFY_ON_SUCCESS="${NOTIFY_ON_SUCCESS:-true}"
   NOTIFY_ON_FAILURE="${NOTIFY_ON_FAILURE:-true}"
   BACKUP_TARGET="${PRIMARY_TARGET:-${BACKUP_TARGET:-github}}"
+  SECONDARY_TARGET="${SECONDARY_TARGET:-none}"
+  SNAPSHOT_MODE="${SNAPSHOT_MODE:-stop}"
+  WEBDAV_RETENTION_DAYS="${WEBDAV_RETENTION_DAYS:-0}"
+  WEBDAV_MIN_KEEP="${WEBDAV_MIN_KEEP:-7}"
+  ALERT_MAX_BACKUP_AGE_HOURS="${ALERT_MAX_BACKUP_AGE_HOURS:-}"
+  ALERT_MAX_DRILL_AGE_DAYS="${ALERT_MAX_DRILL_AGE_DAYS:-90}"
+  CONTAINER_MATCH="${CONTAINER_MATCH:-}"
   GITHUB_REPO="${GITHUB_REPO:-}"
   GITHUB_BRANCH="${GITHUB_BRANCH:-main}"
   GITHUB_SSH_KEY="${GITHUB_SSH_KEY:-/root/.ssh/vw_github_backup}"
@@ -637,6 +644,17 @@ check_configuration() {
   if [[ "$BACKUP_TARGET" == github ]]; then
     [[ -f "$GITHUB_SSH_KEY" ]] || { err "SSH 私钥不存在：$GITHUB_SSH_KEY"; return 1; }
   fi
+  case "${SECONDARY_TARGET:-none}" in
+    none) ;;
+    github)
+      [[ -n "$GITHUB_REPO" && -f "$GITHUB_SSH_KEY" && -d "${REPO_DIR:-}/.git" ]] ||
+        { err "次目标 GitHub 配置不完整：需要仓库、SSH 私钥和 Git 工作目录。"; return 1; }
+      ;;
+    webdav)
+      [[ -f "$WEBDAV_CONFIG_FILE" ]] || { err "次目标 WebDAV 尚未配置，请先运行菜单 [12]。"; return 1; }
+      ;;
+    *) err "SECONDARY_TARGET 配置无效：$SECONDARY_TARGET"; return 1 ;;
+  esac
   printf '数据库大小：%s\n' "$(du -h "$DATA_DIR/db.sqlite3" | awk '{print $1}')"
   printf '整个 /data 大小：%s\n' "$(du -sh "$DATA_DIR" | awk '{print $1}')"
   printf '数据目录剩余磁盘：%s\n' "$(df -h "$DATA_DIR" | awk 'NR==2 {print $4}')"
@@ -1243,9 +1261,10 @@ restore_from_github() (
 
 verify_github_backup() (
   local source="${1:-choose}"
-  local temp_root="" identity="" identity_pub="" archive="" staging="" sqlite_result=""
+  local temp_root="" staging_root="" identity="" identity_pub="" archive="" staging="" sqlite_result=""
   cleanup_verify() {
     [[ -n "${temp_root:-}" ]] && rm -rf -- "$temp_root"
+    [[ -n "${staging_root:-}" ]] && rm -rf -- "$staging_root"
     [[ -n "${staging:-}" ]] && rm -rf -- "$staging"
     return 0
   }
@@ -1275,7 +1294,11 @@ verify_github_backup() (
   [[ "$identity_pub" == "$AGE_RECIPIENT" ]] || { err "该私钥对应的公钥与当前配置不匹配。"; return 1; }
   echo
   echo "第 3 项：实际解密、读取归档目录"
-  staging="$temp_root/staging"
+  staging_root=$(vw_require_tmpfs_dir "vw-${source}-verify") || {
+    err "本地解密验证需要可用的 /dev/shm tmpfs；已停止，避免把明文写入持久磁盘。"
+    return 1
+  }
+  staging="$staging_root/staging"
   accept_backup_signature "$archive" || return 1
   VW_ALLOW_UNSIGNED="$ALLOW_UNSIGNED" VW_MIN_FREE_MB="${MIN_FREE_MB:-512}" VW_STORAGE_TOOL="$STORAGE_TOOL" bash "$RESTORE_SCRIPT" "$archive" "$identity" "$staging" || { err "解密或归档检查失败。"; return 1; }
   echo
@@ -1307,12 +1330,13 @@ verify_github_backup() (
 
 restore_rehearsal() (
   set -Eeuo pipefail
-  local temp_root="" identity="" archive="" staging="" container="" image="" test_name="" state="" health=""
+  local temp_root="" staging_root="" identity="" archive="" staging="" container="" image="" test_name="" state="" health=""
   cleanup_rehearsal() {
     if [[ -n "${test_name:-}" ]] && docker inspect "$test_name" >/dev/null 2>&1; then
       docker rm -f "$test_name" >/dev/null 2>&1 || true
     fi
     [[ -n "${temp_root:-}" ]] && rm -rf -- "$temp_root"
+    [[ -n "${staging_root:-}" ]] && rm -rf -- "$staging_root"
     return 0
   }
   trap cleanup_rehearsal EXIT
@@ -1338,7 +1362,11 @@ restore_rehearsal() (
   local pub
   pub=$(age-keygen -y "$identity") || { err "无法读取 age 私钥。"; return 1; }
   [[ "$pub" == "$AGE_RECIPIENT" ]] || { err "此私钥与配置中的 AGE_RECIPIENT 不匹配。"; return 1; }
-  staging="$temp_root/staging"
+  staging_root=$(vw_require_tmpfs_dir "vw-drill") || {
+    err "隔离恢复演练需要可用的 /dev/shm tmpfs；已停止，避免把明文写入持久磁盘。"
+    return 1
+  }
+  staging="$staging_root/staging"
   accept_backup_signature "$archive" || return 1
   VW_ALLOW_UNSIGNED="$ALLOW_UNSIGNED" VW_MIN_FREE_MB="${MIN_FREE_MB:-512}" VW_STORAGE_TOOL="$STORAGE_TOOL" bash "$RESTORE_SCRIPT" "$archive" "$identity" "$staging" || { err "备份解密或 SQLite 检查失败。"; return 1; }
   test_name="vw-restore-drill-$(date +%Y%m%d%H%M%S)-$$"

@@ -10,7 +10,7 @@
 ![Panel](https://img.shields.io/badge/panel-1Panel-1677ff)
 ![Encryption](https://img.shields.io/badge/encryption-age-16a34a)
 ![Scheduler](https://img.shields.io/badge/scheduler-systemd-6d28d9)
-![Version](https://img.shields.io/badge/version-1.5.1-blue)
+![Version](https://img.shields.io/badge/version-1.5.2-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Tests](https://github.com/OmenTwwnmfm/vaultwarden-1panel-backup-manager/actions/workflows/ci.yml/badge.svg)
 
@@ -127,7 +127,7 @@ WebDAV 使用已有 age 公钥加密完整 `/data` 和部署清单。备份只�
 - **恢复目标保护**：生产数据覆盖及回滚前，按已确认的 `/data` 主机路径重新确认唯一容器并验证已停止；不明状态或容器身份变化时中止。
 - **归档与数据库校验**：解压前拒绝路径穿越、符号/硬链接、特殊文件、重复路径和 setuid/setgid 条目；正式恢复必须通过 SQLite `quick_check`，并预检暂存分区空间。
 - **恢复后健康检查**：启动容器后优先主动执行 Vaultwarden `/healthcheck.sh`，每 2 秒探测一次、连续两次成功后立即继续；单次探测有 12 秒超时、总等待上限 120 秒。未通过时仍按安全策略尝试回滚到恢复前快照。
-- **恢复演练**：在临时目录解密并检查历史备份，不修改生产数据。
+- **恢复演练**：在 `/dev/shm` tmpfs 解密并检查历史备份，不修改生产数据；无法提供 tmpfs 时拒绝执行，避免明文落盘。
 - **历史备份管理**：列出 GitHub 当前分支中的备份，支持永久保留标记、取消标记和删除当前分支文件；自动过期清理会跳过已保护备份，并明确提醒 Git 历史仍可能保留旧对象。
 - **部署清单**：每次备份生成一份经过脱敏的 1Panel/Docker 部署清单，并用同一 age 公钥加密；可在灾难恢复时查看。
 - **二次确认**：停止服务、覆盖生产数据、删除历史备份、暂停定时器等危险操作均要求显式确认。
@@ -279,7 +279,7 @@ tail -n 100 /var/log/vaultwarden-backup.log
 
 ## 备份完整性与恢复演练
 
-备份工作器检查容器、`/data`、可用空间、SQLite、归档和密文 SHA256，并核验 GitHub 远端提交或 WebDAV 回读哈希。在 `[05]` 临时提供原 age 私钥可执行解密和 SQLite 校验。在 `[09]` 可用无网络、无端口映射的临时容器演练恢复并检查能否启动。
+备份工作器检查容器、`/data`、可用空间、SQLite、归档和密文 SHA256，并核验 GitHub 远端提交或 WebDAV 回读哈希。在 `[05]` 临时提供原 age 私钥可执行解密和 SQLite 校验；明文暂存目录必须位于 `/dev/shm` tmpfs，空间不足时拒绝执行。在 `[09]` 可用无网络、无端口映射的临时容器演练恢复并检查能否启动。
 
 恢复流程在正式覆盖数据前会先解密到暂存目录、检查数据库，并加密保存当前生产数据为 `pre-restore-*.tar.gz.age` 回滚快照。恢复后会等待容器达到 running/healthy；健康检查失败时会尝试回滚。即使工具报告恢复成功，也必须人工登录原账户检查密码库、附件、TOTP 和客户端同步。确认前不要删除回滚快照。
 

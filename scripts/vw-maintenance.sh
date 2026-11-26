@@ -63,12 +63,26 @@ show_operational_status() {
 }
 
 warn_if_helpers_stale() {
-  [[ -r "$CONFIG_FILE" && -f "$SCRIPT_DIR/vw-backup.sh" ]] || return 0
-  if ! cmp -s "$SCRIPT_DIR/vw-backup.sh" "$BACKUP_SCRIPT" ||
-     ! cmp -s "$SCRIPT_DIR/vw-storage.py" /usr/local/libexec/vw-storage.py ||
-     ! cmp -s "$SCRIPT_DIR/vw-common.sh" /usr/local/libexec/vw-common.sh ||
-     ! cmp -s "$SCRIPT_DIR/vw-maintenance.sh" /usr/local/libexec/vw-maintenance.sh ||
-     ! cmp -s "$SCRIPT_DIR/vw-restore-prepare.sh" "$RESTORE_SCRIPT"; then
-    warn "后台脚本与当前源码不同，请使用菜单 [22] 同步。"
+  [[ -r "$CONFIG_FILE" && -f "$SCRIPT_DIR/vw-backup.sh" && -f "$SCRIPT_DIR/../run.sh" ]] || return 0
+  local source installed mismatched=()
+  check_helper() {
+    source="$1"
+    installed="$2"
+    if [[ ! -f "$source" || ! -f "$installed" ]] || ! cmp -s "$source" "$installed"; then
+      mismatched+=("$(basename -- "$source")")
+    fi
+  }
+  check_helper "$SCRIPT_DIR/vw-common.sh" /usr/local/libexec/vw-common.sh
+  check_helper "$SCRIPT_DIR/vw-maintenance.sh" /usr/local/libexec/vw-maintenance.sh
+  check_helper "$SCRIPT_DIR/vw-backup.sh" "$BACKUP_SCRIPT"
+  check_helper "$SCRIPT_DIR/vw-restore-prepare.sh" "$RESTORE_SCRIPT"
+  check_helper "$SCRIPT_DIR/vw-storage.py" /usr/local/libexec/vw-storage.py
+  check_helper "$SCRIPT_DIR/vw-manifest.py" /usr/local/libexec/vw-manifest.py
+  check_helper "$SCRIPT_DIR/vw-archive-check.py" /usr/local/libexec/vw-archive-check.py
+  check_helper "$SCRIPT_DIR/vw-diagnose.sh" /usr/local/sbin/vw-diagnose.sh
+  check_helper "$SCRIPT_DIR/vw-performance.py" /usr/local/libexec/vw-performance.py
+  check_helper "$SCRIPT_DIR/vw-manager.sh" "$MANAGER_SCRIPT"
+  if ((${#mismatched[@]})); then
+    warn "后台脚本与当前源码不同：${mismatched[*]}；请使用菜单 [22] 同步。"
   fi
 }

@@ -21,7 +21,7 @@ ALERT_MAX_DRILL_AGE_DAYS="90"
 CONTAINER_MATCH=""
 AGE_IDENTITY_DEFAULT="/root/vw-age-identity.txt"
 
-# 自动化：每日 VPS 本地时间 05:20；由菜单 9 安装 systemd timer。
+# 自动化：每日 VPS 本地时间 05:20；由菜单 14 安装 systemd timer。
 SYSTEMD_TIME="*-*-* 05:20:00"
 BACKUP_FREQUENCY="daily"  # daily / weekly / monthly
 MIN_FREE_MB="512"
@@ -38,5 +38,5 @@ WEBHOOK_URL=""
 NOTIFY_ON_SUCCESS="true"
 NOTIFY_ON_FAILURE="true"
 
-# WebDAV credentials are configured separately by menu 24 in /etc/vaultwarden-webdav.json.
+# WebDAV credentials are configured separately by menu 12 in /etc/vaultwarden-webdav.json.
 # BACKUP_TARGET accepts github or webdav for scheduled backups.

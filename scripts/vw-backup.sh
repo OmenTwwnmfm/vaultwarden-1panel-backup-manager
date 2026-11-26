@@ -347,7 +347,16 @@ upload_snapshot() (
       printf '%s\n' "$local_head" > "$TMP_ROOT/github-verified-commit"
       return $?
     fi
-    if ((attempt < GIT_PUSH_RETRIES)); then sleep "$GIT_RETRY_DELAY"; fi
+    if ((attempt < GIT_PUSH_RETRIES)); then
+      echo "GitHub push attempt $attempt failed; refreshing remote state before retry."
+      sleep "$GIT_RETRY_DELAY"
+      git -C "$REPO_DIR" fetch origin "+refs/heads/$GITHUB_BRANCH:refs/remotes/origin/$GITHUB_BRANCH" || return 1
+      if ! git -C "$REPO_DIR" rebase "origin/$GITHUB_BRANCH"; then
+        git -C "$REPO_DIR" rebase --abort >/dev/null 2>&1 || true
+        echo "GitHub push retry could not rebase onto the latest remote branch." >&2
+        return 1
+      fi
+    fi
   done
   return 1
 )

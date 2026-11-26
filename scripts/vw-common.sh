@@ -59,6 +59,20 @@ vw_require_free_space() {
   fi
 }
 
+vw_require_tmpfs_dir() {
+  local prefix="$1" root="/dev/shm" filesystem available directory
+  filesystem=$(stat -f -c '%T' -- "$root" 2>/dev/null || true)
+  [[ "$filesystem" == tmpfs ]] || {
+    vw_error "无法使用 /dev/shm：它不存在或不是 tmpfs。本地解密验证需要 tmpfs，以免把明文写到持久磁盘。"
+    return 1
+  }
+  available=$(df -PB1 -- "$root" 2>/dev/null | awk 'NR == 2 {print $4}' || true)
+  [[ "$available" =~ ^[0-9]+$ ]] || { vw_error "无法读取 /dev/shm 剩余空间。"; return 1; }
+  directory=$(mktemp -d "${root}/${prefix}.XXXXXX") || return 1
+  chmod 700 -- "$directory" || { rm -rf -- "$directory"; return 1; }
+  printf '%s' "$directory"
+}
+
 # Exports: VW_DETECTED_CONTAINER, VW_DETECTED_IMAGE, VW_DETECTED_STATUS,
 # VW_DETECTED_DATA_DIR, VW_DETECTED_HEALTH.
 vw_find_target() {
