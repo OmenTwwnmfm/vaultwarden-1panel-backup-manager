@@ -13,7 +13,7 @@ labels: bug
 
 - 项目版本：
 - 操作系统（Ubuntu / Debian 及版本）：
-- 1Panel 版本：
+- 部署方式（1Panel / docker compose / docker run）及 1Panel 版本：
 - Vaultwarden 版本：
 - 使用的菜单编号或命令：
 

@@ -55,12 +55,52 @@ for container_port, bindings in (host.get("PortBindings") or {}).items():
     ]
 
 networks = sorted((network_settings.get("Networks") or {}).keys())
+labels = config.get("Labels") or {}
+name = (obj.get("Name") or "").lstrip("/")
+compose_project = labels.get("com.docker.compose.project")
+compose_files = labels.get("com.docker.compose.project.config_files")
+compose_dir = labels.get("com.docker.compose.project.working_dir")
+data_mount = next((m for m in mounts if m.get("destination") == "/data"), {})
+onepanel_hint = "1panel" in " ".join(filter(None, [name, compose_dir or "", compose_files or "", data_mount.get("source") or ""])).lower()
+if onepanel_hint:
+    deployment = "1panel"
+elif compose_project:
+    deployment = "docker-compose"
+else:
+    deployment = "docker"
+
+if deployment == "1panel":
+    install_notes = [
+        "Install Docker and 1Panel using your normal trusted process.",
+        "Install Vaultwarden from the 1Panel App Store, preferably using the recorded image version.",
+    ]
+    secrets_note = "Recreate domain, HTTPS, SMTP and other secrets manually in 1Panel; this manifest intentionally does not contain secret values."
+elif deployment == "docker-compose":
+    install_notes = [
+        "Install Docker and the Compose plugin using your normal trusted process.",
+        "Restore your own copy of the compose project (see deployment.compose_config_files) and pin the recorded image version.",
+    ]
+    secrets_note = "Recreate domain, HTTPS, SMTP and other secrets in your compose file or .env; this manifest intentionally does not contain secret values."
+else:
+    install_notes = [
+        "Install Docker using your normal trusted process.",
+        "Recreate the Vaultwarden container with the recorded image, ports, networks, restart policy and /data mount.",
+    ]
+    secrets_note = "Recreate domain, HTTPS, SMTP and other secrets as container environment variables; this manifest intentionally does not contain secret values."
+
 manifest = {
-    "manifest_format": 1,
+    "manifest_format": 2,
     "generated_utc": datetime.now(timezone.utc).isoformat(),
-    "warning": "Sanitized inventory only. Secret environment-variable values are intentionally omitted. Recreate the app manually in 1Panel and review settings before starting it.",
+    "warning": "Sanitized inventory only. Secret environment-variable values are intentionally omitted. Recreate the deployment manually and review settings before starting it.",
+    "deployment": {
+        "type": deployment,
+        "compose_project": compose_project,
+        "compose_config_files": compose_files,
+        "compose_working_dir": compose_dir,
+        "compose_service": labels.get("com.docker.compose.service"),
+    },
     "container": {
-        "name": (obj.get("Name") or "").lstrip("/"),
+        "name": name,
         "image": config.get("Image"),
         "image_reference": config.get("Image"),
         "image_id": obj.get("Image"),
@@ -73,12 +113,10 @@ manifest = {
         "safe_environment": env_values,
         "omitted_environment_variable_names": sorted(redacted_names),
     },
-    "recovery_notes": [
-        "Install Docker and 1Panel using your normal trusted process.",
-        "Install Vaultwarden from the 1Panel App Store, preferably using the recorded image version.",
+    "recovery_notes": install_notes + [
         "Stop the newly created Vaultwarden container before restoring its /data mount.",
         "Restore the encrypted /data backup into the new container's host-side /data mount.",
-        "Recreate domain, HTTPS, SMTP and other secrets manually in 1Panel; this manifest intentionally does not contain secret values.",
+        secrets_note,
     ],
 }
 fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)

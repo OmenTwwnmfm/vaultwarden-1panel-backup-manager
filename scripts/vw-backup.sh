@@ -273,15 +273,15 @@ on_exit() {
         echo "Vaultwarden restart succeeded."
       else
         vw_perf_downtime_end failed
-        echo "CRITICAL: Vaultwarden could not be confirmed healthy. Start/check it in 1Panel immediately."
-        vw_notify failure "CRITICAL: Vaultwarden backup task failed and container $CONTAINER could not be confirmed healthy. Check 1Panel immediately." || true
+        echo "CRITICAL: Vaultwarden could not be confirmed healthy. Start/check it (1Panel or docker compose) immediately."
+        vw_notify failure "CRITICAL: Vaultwarden backup task failed and container $CONTAINER could not be confirmed healthy. Check it (1Panel or docker compose) immediately." || true
         rc=1
       fi
     else
       vw_perf_stage_end failed
       vw_perf_downtime_end failed
-      echo "CRITICAL: docker start failed. Start/check Vaultwarden in 1Panel immediately."
-      vw_notify failure "CRITICAL: Vaultwarden backup task failed and docker start failed for $CONTAINER. Check 1Panel immediately." || true
+      echo "CRITICAL: docker start failed. Start/check Vaultwarden (1Panel or docker compose) immediately."
+      vw_notify failure "CRITICAL: Vaultwarden backup task failed and docker start failed for $CONTAINER. Check it (1Panel or docker compose) immediately." || true
       rc=1
     fi
   fi
@@ -325,7 +325,7 @@ fi
 OLD_CONTAINER="$CONTAINER"; OLD_DATA_DIR="$DATA_DIR"
 if ! vw_find_target "$CONTAINER" "$DATA_DIR" true; then FAILURE_REASON="cannot identify unique running Vaultwarden container"; exit 1; fi
 CONTAINER="$VW_DETECTED_CONTAINER"; DATA_DIR="$VW_DETECTED_DATA_DIR"
-[[ "$CONTAINER" == "$OLD_CONTAINER" ]] || echo "INFO: 1Panel recreated container: $OLD_CONTAINER -> $CONTAINER"
+[[ "$CONTAINER" == "$OLD_CONTAINER" ]] || echo "INFO: container was recreated: $OLD_CONTAINER -> $CONTAINER"
 [[ "$DATA_DIR" == "$OLD_DATA_DIR" ]] || echo "INFO: data path updated: $OLD_DATA_DIR -> $DATA_DIR"
 # Only rewrite the config when discovery changed it, so a scheduled run does
 # not overwrite settings saved from the menu while this run is in progress.

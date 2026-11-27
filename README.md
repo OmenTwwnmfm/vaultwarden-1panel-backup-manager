@@ -4,7 +4,7 @@
 
 **交互式备份 · age 加密 · GitHub / WebDAV 异地备份 · 灾难恢复 · systemd 自动运维**
 
-面向 Ubuntu / Debian 上通过 1Panel 应用商店安装的 Vaultwarden（SQLite）
+面向 Ubuntu / Debian 上通过 Docker 部署（1Panel 应用商店、docker compose 或 docker run）的 Vaultwarden（SQLite）
 
 ![Platform](https://img.shields.io/badge/platform-Ubuntu%20%7C%20Debian-blue)
 ![Panel](https://img.shields.io/badge/panel-1Panel-1677ff)
@@ -20,9 +20,9 @@
 
 ## 项目简介
 
-Vaultwarden 将用户密码库保存在自己的服务器上，因此需要可靠的异地备份和可验证的恢复流程。本项目提供一个面向 1Panel 应用商店版 Vaultwarden 的交互式运维管理器，帮助管理员发现正确的 Docker 容器和 `/data` 主机挂载目录，将完整数据目录加密后同步到独立的 GitHub Private 仓库或 WebDAV 专用目录，并在需要时从历史备份恢复。
+Vaultwarden 将用户密码库保存在自己的服务器上，因此需要可靠的异地备份和可验证的恢复流程。本项目提供一个面向 Docker 部署版 Vaultwarden（1Panel 应用商店、docker compose 或 docker run）的交互式运维管理器，帮助管理员发现正确的 Docker 容器和 `/data` 主机挂载目录，将完整数据目录加密后同步到独立的 GitHub Private 仓库或 WebDAV 专用目录，并在需要时从历史备份恢复。
 
-项目重点不是再部署一套 Vaultwarden，而是保护已经由 1Panel 管理的现有实例。1Panel 继续负责应用安装、Docker、域名、HTTPS 证书和反向代理；本项目负责数据备份、校验、通知、历史管理和灾难恢复。
+项目重点不是再部署一套 Vaultwarden，而是保护已经在运行的现有实例。1Panel 或你自己的 compose 文件继续负责应用安装、Docker、域名、HTTPS 证书和反向代理；本项目负责数据备份、校验、通知、历史管理和灾难恢复。
 
 兄弟项目 [vaultwarden-1panel-hardening-manager](https://github.com/OmenTwwnmfm/vaultwarden-1panel-hardening-manager)（`vhm`）管「门锁不坏」：安全体检、SSH 双因素、Fail2Ban、防火墙和变更回滚；本项目管「数据不丢」。建议先用 vhm 加固，再用本项目备份。
 
@@ -99,7 +99,7 @@ WebDAV 使用已有 age 公钥加密完整 `/data` 和部署清单。备份只�
 
 ### 自动备份与完整性
 
-- **自动发现容器**：每次备份重新扫描 Docker，不依赖 1Panel 生成的固定容器名后缀。
+- **自动发现容器**：每次备份重新扫描 Docker，不依赖 1Panel 或 compose 生成的固定容器名后缀。
 - **数据路径身份保护**：以已确认的 `/data` 主机挂载路径作为实例身份；如果路径消失、改变或出现多个候选实例，安全停止而不是猜测。
 - **一致性快照**：备份窗口内短暂停止 Vaultwarden，打包整个 `/data`，包括 SQLite 数据库及其 WAL/SHM 文件（如存在）、附件、Send 文件、配置、RSA 密钥等；加密归档创建后立即尝试重启服务，网络上传在服务恢复后进行。
 - **SQLite 检查**：备份停止容器后执行 `PRAGMA quick_check`；恢复必须安装 `sqlite3` 并在覆盖生产数据前再次通过完整性检查。
@@ -109,15 +109,15 @@ WebDAV 使用已有 age 公钥加密完整 `/data` 和部署清单。备份只�
 - **本次运行结果**：每次运行有独立 ID 和阶段结果文件；锁冲突以退出码 `75` 明确标记跳过。升级前保护只接受本次的本地校验、服务恢复和远端核验成功结果。
 - **空间预检与快照保留**：在数据盘、备份目录、Git 工作目录和临时目录检查可用空间；加密快照完整生成后即保留，后续容器启动、健康探测或远端上传失败不会删除密文。
 - **GitHub 推送重试**：GitHub 遇到临时网络错误时按配置重试；不会使用 `--force` 覆盖远程历史。WebDAV 使用临时文件、禁止覆盖发布和回读校验。
-- **主动健康探测与磁盘阈值**：备份前检查剩余磁盘空间。容器启动后，若 Docker Healthcheck 配置为 Vaultwarden 官方 `/healthcheck.sh`，管理器会在容器内每 2 秒主动执行同一个探针，连续 2 次成功即确认应用就绪，最长等待 120 秒，单次探测另有 12 秒超时保护；不修改 1Panel 管理的 Docker Healthcheck。非标准镜像回退到 Docker 原生状态轮询。
+- **主动健康探测与磁盘阈值**：备份前检查剩余磁盘空间。容器启动后，若 Docker Healthcheck 配置为 Vaultwarden 官方 `/healthcheck.sh`，管理器会在容器内每 2 秒主动执行同一个探针，连续 2 次成功即确认应用就绪，最长等待 120 秒，单次探测另有 12 秒超时保护；不修改容器自身的 Docker Healthcheck 配置。非标准镜像回退到 Docker 原生状态轮询。
 
-### 自动化运维（不依赖 1Panel 计划任务）
+### 自动化运维（不依赖 1Panel 计划任务或 cron）
 
 - **systemd timer**：由 Ubuntu / Debian 系统本身调度，支持每天、每周日或每月 1 日运行；默认每天按 VPS 本地时区 05:20 备份。
 - **错过任务补执行**：使用 `Persistent=true`，机器关机错过计划后可在下次启动时补执行。
 - **成功/失败通知**：支持 Telegram、ntfy 或通用 Webhook；通知发送失败不会改变备份结果。
 - **日志轮转**：安装 logrotate 配置，避免备份日志无限增长。
-- **升级前保护**：在 1Panel 更新 Vaultwarden 前，先自动执行一份完整备份并核验当前目标远端数据。
+- **升级前保护**：在更新 Vaultwarden（1Panel 或 docker compose pull）前，先自动执行一份完整备份并核验当前目标远端数据。
 - **诊断报告**：生成脱敏的系统、Docker、数据路径、磁盘、定时器和备份日志报告。
 
 ### 恢复与维护
@@ -129,7 +129,7 @@ WebDAV 使用已有 age 公钥加密完整 `/data` 和部署清单。备份只�
 - **恢复后健康检查**：启动容器后优先主动执行 Vaultwarden `/healthcheck.sh`，每 2 秒探测一次、连续两次成功后立即继续；单次探测有 12 秒超时、总等待上限 120 秒。未通过时仍按安全策略尝试回滚到恢复前快照。
 - **恢复演练**：在 `/dev/shm` tmpfs 解密并检查历史备份，不修改生产数据；无法提供 tmpfs 时拒绝执行，避免明文落盘。
 - **历史备份管理**：列出 GitHub 当前分支中的备份，支持永久保留标记、取消标记和删除当前分支文件；自动过期清理会跳过已保护备份，并明确提醒 Git 历史仍可能保留旧对象。
-- **部署清单**：每次备份生成一份经过脱敏的 1Panel/Docker 部署清单，并用同一 age 公钥加密；可在灾难恢复时查看。
+- **部署清单**：每次备份生成一份经过脱敏的部署清单（自动识别 1Panel、docker compose 或 docker run），并用同一 age 公钥加密；可在灾难恢复时查看。
 - **二次确认**：停止服务、覆盖生产数据、删除历史备份、暂停定时器等危险操作均要求显式确认。
 
 ## 适用环境与边界
@@ -137,14 +137,14 @@ WebDAV 使用已有 age 公钥加密完整 `/data` 和部署清单。备份只�
 | 项目 | 要求 |
 |---|---|
 | 操作系统 | Ubuntu / Debian（使用 systemd） |
-| 面板 | 1Panel 已安装并正常运行 |
-| Vaultwarden | 通过 1Panel 应用商店安装的 Docker 版本 |
+| 部署方式 | 1Panel 应用商店、docker compose 或 docker run（三者均已实测） |
+| Vaultwarden | 官方 `vaultwarden/server` Docker 镜像；`/data` 可为 bind mount 或命名卷 |
 | 数据库 | SQLite |
 | 容器数据路径 | 容器内 `/data` 挂载到 VPS 主机目录 |
 | 权限 | root，或可通过 sudo 管理 Docker、systemd 和系统目录 |
 | 远端 | 独立 GitHub Private 备份仓库或 WebDAV HTTPS 专用目录 |
 
-**不支持** MySQL/PostgreSQL 外部数据库、容器内非 `/data` 的自定义数据布局、非 systemd Linux 发行版。项目不安装或升级 Docker/1Panel/Vaultwarden，不配置域名、HTTPS 或反向代理，也不会自动执行 Vaultwarden 版本升级。
+**不支持** MySQL/PostgreSQL 外部数据库、容器内非 `/data` 的自定义数据布局（含修改 `DATA_FOLDER`）、非 Docker 的二进制/systemd 直装、Podman、非 systemd Linux 发行版。项目不安装或升级 Docker/1Panel/Vaultwarden，不配置域名、HTTPS 或反向代理，也不会自动执行 Vaultwarden 版本升级。
 
 本项目针对普通个人/小型实例，提供 GitHub Private 和 WebDAV 两种独立异地存储目标，不包含多 age 密钥、Restic 或 S3 兼容对象存储。单个 GitHub 普通 Git 文件默认限制为 90 MiB。删除当前分支文件不会自动清除 Git 历史对象；需定期关注仓库体积。
 
@@ -230,7 +230,7 @@ vw-YYYYMMDD-HHMMSS.manifest.json.age.sha256
 
 部署清单只保留镜像、挂载、端口、网络和经允许的非敏感参数；秘密环境变量只记录变量名，不保存具体值。清单本身也会 age 加密。
 
-## systemd 自动备份（不依赖 1Panel）
+## systemd 自动备份（不依赖 1Panel 计划任务或 cron）
 
 首次手动备份验证成功后，在 `[14]` 选择定时备份目标、频率和执行时间。默认每天 VPS 本地时间 05:20。
 
@@ -285,9 +285,9 @@ tail -n 100 /var/log/vaultwarden-backup.log
 
 ## 升级前保护与部署清单
 
-- 在 1Panel 更新 Vaultwarden 前，使用菜单 `[19]` 创建并验证升级前备份。只有完整备份和当前目标远端校验成功，才建议继续升级。
-- 本项目不会自动升级 Vaultwarden，升级动作仍由 1Panel 完成。
-- 每次备份会记录一份脱敏部署清单。发生 VPS 损坏时，可用菜单 `[06]` 选择并解密清单，参考原镜像版本、挂载、端口、网络和非敏感环境设置，在新 VPS 的 1Panel 中手动重建应用。
+- 在更新 Vaultwarden（1Panel 或 docker compose pull）前，使用菜单 `[19]` 创建并验证升级前备份。只有完整备份和当前目标远端校验成功，才建议继续升级。
+- 本项目不会自动升级 Vaultwarden，升级动作仍由 1Panel 或你的 compose 流程完成。
+- 每次备份会记录一份脱敏部署清单。发生 VPS 损坏时，可用菜单 `[06]` 选择并解密清单，参考原镜像版本、挂载、端口、网络和非敏感环境设置，在新 VPS 上用 1Panel、docker compose 或 docker run 手动重建应用；清单会注明原部署方式和 compose 项目信息。
 - SMTP 密码、Admin Token、Webhook Token 等秘密值不会进入部署清单；必须从你自己的密码管理或安全记录中恢复。
 
 ## 历史备份管理与 GitHub 容量
@@ -300,8 +300,8 @@ GitHub 历史只增不减，删除备份不会缩小仓库。`[03]` 和 `vbm sta
 
 ## 新 VPS 灾难恢复概要
 
-1. 在新 VPS 上通过 1Panel 安装好兼容版本的 Vaultwarden 应用；不要创建新用户。
-2. 配置好原域名、HTTPS 和必要的 1Panel 应用参数。
+1. 在新 VPS 上用原部署方式（1Panel、docker compose 或 docker run）创建兼容版本的 Vaultwarden 容器，`/data` 挂载到主机；不要创建新用户。
+2. 配置好原域名、HTTPS 和必要的应用参数（1Panel 应用参数或 compose 环境变量）。
 3. 从 GitHub 取得项目源码，运行管理器菜单 1；目标应是新应用的 `/data` 主机挂载路径，但 age 公钥必须填写旧备份使用的原公钥。
 4. 为新 VPS 创建新的 GitHub Deploy Key，并给备份仓库写权限；旧 VPS 已销毁时可以移除旧 Deploy Key。
 5. 将离线保存的原 age 私钥临时复制到新 VPS，运行菜单 `[08]` 选择旧备份恢复。恢复完成并确认成功后，安全删除 VPS 上临时私钥副本。
@@ -311,7 +311,7 @@ GitHub 历史只增不减，删除备份不会缩小仓库。`[03]` 和 `vbm sta
 
 ## 常见问题
 
-**1Panel 更新后容器名称变了怎么办？** 备份前会重新发现容器，并按原先已确认的 `/data` 主机路径匹配。若匹配唯一则更新容器名；若找不到原路径或发现多个候选项会停止，需运行菜单 1 重新确认。
+**1Panel 更新或 docker compose 重建后容器名称变了怎么办？** 备份前会重新发现容器，并按原先已确认的 `/data` 主机路径匹配。若匹配唯一则更新容器名；若找不到原路径或发现多个候选项会停止，需运行菜单 1 重新确认。
 
 **备份显示 0 MiB 是否为空？** 旧版会将小文件按整数 MiB 显示。可在 `[05]` 使用原 age 私钥验证，或用 `[09]` 演练恢复。
 

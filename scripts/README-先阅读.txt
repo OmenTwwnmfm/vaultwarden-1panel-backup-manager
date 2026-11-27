@@ -4,12 +4,12 @@ Vaultwarden 1Panel Backup Manager v1.5.4
 适用环境
 --------
 - Ubuntu / Debian VPS，使用 systemd。
-- Docker 已由 1Panel 安装和管理。
-- Vaultwarden 已从 1Panel 应用商店安装为 Docker 应用。
+- Docker 已安装（可由 1Panel 管理，也可独立安装）。
+- Vaultwarden 以 Docker 容器运行：1Panel 应用商店、docker compose 或 docker run 均可。
 - 使用 SQLite，容器内数据目录挂载为 /data。
 - 具有 root 权限或可通过 sudo 管理 Docker、systemd 和系统目录。
 
-本项目不会安装 Docker、Vaultwarden、域名、HTTPS 或反向代理；这些均由 1Panel 负责。
+本项目不会安装 Docker、Vaultwarden、域名、HTTPS 或反向代理；这些由 1Panel 或你自己的 compose 配置负责。
 
 启动方式
 --------
@@ -74,7 +74,7 @@ Vaultwarden 1Panel Backup Manager v1.5.4
 
 自动备份
 --------
-推荐使用 Ubuntu/Debian 的 systemd timer，不依赖 1Panel 计划任务。先手动备份并验证，再在 [14] 安装或修改计划；[15] 查看状态，[16] 暂停，[17] 恢复。默认每天 VPS 本地时间 05:20，Persistent=true 支持错过计划后补执行。
+推荐使用 Ubuntu/Debian 的 systemd timer，不依赖 1Panel 计划任务或 cron。先手动备份并验证，再在 [14] 安装或修改计划；[15] 查看状态，[16] 暂停，[17] 恢复。默认每天 VPS 本地时间 05:20，Persistent=true 支持错过计划后补执行。
 
 常用命令：
   systemctl list-timers --all | grep vw-backup

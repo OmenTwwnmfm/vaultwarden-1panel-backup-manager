@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Interactive manager for 1Panel App Store Vaultwarden (SQLite, /data mount).
+# Interactive manager for Docker-deployed Vaultwarden (1Panel, docker compose or docker run; SQLite, /data mount).
 # This script does NOT install Docker, Vaultwarden, HTTPS, or reverse proxy.
 set -Eeuo pipefail
 umask 077
@@ -87,7 +87,7 @@ require_tty() {
 
 require_docker() {
   if ! command -v docker >/dev/null 2>&1; then
-    err "没有找到 docker 命令。请先确认 1Panel 已安装并正常管理 Docker。"
+    err "没有找到 docker 命令。请先安装 Docker（可由 1Panel 管理，也可独立安装）。"
     return 1
   fi
 }
@@ -131,7 +131,7 @@ list_vaultwarden_containers() {
     fi
   done
   if ((${#matches[@]} == 0)); then
-    err "没有发现名称或镜像中包含 vaultwarden 的容器。请先在 1Panel 应用商店确认 Vaultwarden 已安装。"
+    err "没有发现名称或镜像中包含 vaultwarden 的容器。请先确认 Vaultwarden 已通过 Docker 部署（1Panel 应用商店、docker compose 或 docker run）。"
     return 1
   fi
   printf '\n发现以下 Vaultwarden 候选容器：\n'
@@ -434,7 +434,7 @@ update_installed_scripts() {
   echo "将更新管理器、备份/恢复/诊断/性能/WebDAV 工具、全局 vbm 命令及公共库，不会修改现有备份配置、age 公钥、SSH 密钥、WebDAV 凭据或远端备份。若 systemd timer 已安装，timer 文件会保留。"
   confirm_yes_upper "确认安装当前项目目录中的新版脚本？" || { warn "已取消。"; return 0; }
   install_helper_scripts || { err "脚本更新失败。"; return 1; }
-  ok "更新完成。全局命令 vbm 已安装/更新；下一次备份将自动重新检测 1Panel 当前容器名称及 /data 主机目录。"
+  ok "更新完成。全局命令 vbm 已安装/更新；下一次备份将自动重新检测当前容器名称及 /data 主机目录。"
   pause
 }
 
@@ -636,7 +636,7 @@ check_configuration() {
     return 1
   fi
   if [[ "$CONTAINER" != "$VW_DETECTED_CONTAINER" || "$(readlink -f "$DATA_DIR")" != "$VW_DETECTED_DATA_DIR" ]]; then
-    warn "检测到 1Panel 可能重建过容器，正在更新记录。"
+    warn "检测到容器可能已被重建（1Panel 更新或 docker compose up 等），正在更新记录。"
     CONTAINER="$VW_DETECTED_CONTAINER"
     DATA_DIR="$VW_DETECTED_DATA_DIR"
     # shellcheck disable=SC2153 # AGE_RECIPIENT 等变量由 load_config 从配置文件载入
@@ -700,7 +700,7 @@ run_backup_now() {
   echo "上次记录数据目录：$DATA_DIR"
   echo "本次手动备份脚本：$worker"
   echo "性能记录文件：/var/lib/vaultwarden-backup/performance.tsv"
-  echo "如果 1Panel 重建过容器，后台脚本会优先按原数据目录重新匹配，并将新容器名写回配置。"
+  echo "如果容器被重建过（例如 1Panel 更新或 docker compose up），后台脚本会优先按原数据目录重新匹配，并将新容器名写回配置。"
   if ! confirm_yes_upper "此操作会使 Vaultwarden 短暂不可用。确认立即备份？"; then warn "已取消。"; return 0; fi
   local rc=0
   if VW_COMMON_LIB="$common_lib" VW_MANIFEST_TOOL="$manifest_tool" VW_PERF_FILE="/var/lib/vaultwarden-backup/performance.tsv" bash "$worker" "$target"; then rc=0; else rc=$?; fi
@@ -915,7 +915,7 @@ restore_from_github() (
     if [[ "${stopped_by_script:-0}" == "1" && "${was_running:-0}" == "1" && -n "${container:-}" ]]; then
       if [[ "${data_change_started:-0}" == "1" ]]; then
         echo "严重提醒：恢复过程中断，数据目录可能处于恢复中间状态。为避免使用不完整数据，容器保持停止。" >&2
-        echo "使用原 age 私钥和回滚文件完成恢复前，不要在 1Panel 中启动该容器。" >&2
+        echo "使用原 age 私钥和回滚文件完成恢复前，不要在 1Panel 或 docker compose 中启动该容器。" >&2
       else
         vw_perf_stage_begin "cleanup_container_start_command"
         if docker start "$container" >/dev/null 2>&1; then
@@ -931,12 +931,12 @@ restore_from_github() (
           else
             vw_perf_stage_end aggregate
             vw_perf_downtime_end aggregate
-            echo "严重提醒：容器已启动，但未通过健康探测。请进入 1Panel 检查：$container" >&2
+            echo "严重提醒：容器已启动，但未通过健康探测。请在 1Panel 或 docker compose 中检查：$container" >&2
           fi
         else
           vw_perf_stage_end failed
           vw_perf_downtime_end aggregate
-          echo "严重提醒：自动清理时无法启动 Vaultwarden。请进入 1Panel 手动启动：$container" >&2
+          echo "严重提醒：自动清理时无法启动 Vaultwarden。请在 1Panel 或 docker compose 中手动启动：$container" >&2
         fi
       fi
     fi
@@ -1083,7 +1083,7 @@ restore_from_github() (
     err "创建恢复前加密快照失败，当前数据目录尚未修改。"
     rm -f -- "$rollback_archive"
     if ((was_running == 1)); then
-      if docker start "$container" >/dev/null 2>&1; then stopped_by_script=0; else warn "请在 1Panel 中手动启动容器。"; fi
+      if docker start "$container" >/dev/null 2>&1; then stopped_by_script=0; else warn "请在 1Panel 或 docker compose 中手动启动容器。"; fi
     fi
     return 1
   fi
@@ -1091,7 +1091,7 @@ restore_from_github() (
     err "恢复前加密快照为空，当前数据目录尚未修改。"
     rm -f -- "$rollback_archive"
     if ((was_running == 1)); then
-      if docker start "$container" >/dev/null 2>&1; then stopped_by_script=0; else warn "请在 1Panel 中手动启动容器。"; fi
+      if docker start "$container" >/dev/null 2>&1; then stopped_by_script=0; else warn "请在 1Panel 或 docker compose 中手动启动容器。"; fi
     fi
     return 1
   fi
@@ -1103,7 +1103,7 @@ restore_from_github() (
     err "恢复前回滚快照校验失败，生产数据尚未替换。"
     rm -f -- "$rollback_archive" "$rollback_archive.sha256" "$rollback_archive.sha256.sig"
     if ((was_running == 1)); then
-      if docker start "$container" >/dev/null 2>&1; then stopped_by_script=0; else warn "请在 1Panel 中手动启动容器。"; fi
+      if docker start "$container" >/dev/null 2>&1; then stopped_by_script=0; else warn "请在 1Panel 或 docker compose 中手动启动容器。"; fi
     fi
     return 1
   fi
@@ -1142,7 +1142,7 @@ restore_from_github() (
       err "严重错误：自动回滚失败！容器保持停止。回滚文件保留在：$rollback_archive"
     fi
     if ((was_running == 1 && rollback_ok == 1)); then
-      if docker start "$container" >/dev/null 2>&1; then stopped_by_script=0; else warn "请在 1Panel 中手动启动容器。"; fi
+      if docker start "$container" >/dev/null 2>&1; then stopped_by_script=0; else warn "请在 1Panel 或 docker compose 中手动启动容器。"; fi
     fi
     return 1
   fi
@@ -1158,7 +1158,7 @@ restore_from_github() (
       err "请勿删除该文件或当前数据目录；需要使用原 age 私钥手动解密恢复。"
     fi
     if ((was_running == 1 && rollback_ok == 1)); then
-      if docker start "$container" >/dev/null 2>&1; then stopped_by_script=0; else warn "请在 1Panel 中手动启动容器。"; fi
+      if docker start "$container" >/dev/null 2>&1; then stopped_by_script=0; else warn "请在 1Panel 或 docker compose 中手动启动容器。"; fi
     fi
     return 1
   fi
@@ -1234,25 +1234,25 @@ restore_from_github() (
             if docker stop --time 20 "$container" >/dev/null 2>&1; then
               stopped_by_script=0
               vw_perf_stage_end success
-              err "原数据已恢复，但回滚后的容器未通过健康检查，已停止容器。请在 1Panel 检查日志。"
+              err "原数据已恢复，但回滚后的容器未通过健康检查，已停止容器。请用 docker logs 检查容器日志。"
             else
               stopped_by_script=0
               vw_perf_stage_end failed
-              err "原数据已恢复，但容器未通过健康检查且无法停止。容器仍在运行，请立即在 1Panel 检查；不要再次覆盖数据。"
+              err "原数据已恢复，但容器未通过健康检查且无法停止。容器仍在运行，请立即检查该容器；不要再次覆盖数据。"
             fi
           fi
         else
           vw_perf_stage_end failed
           stopped_by_script=1
           data_change_started=0
-          err "原数据已恢复，但容器启动失败。请在 1Panel 检查启动状态。"
+          err "原数据已恢复，但容器启动失败。请用 docker logs 检查容器启动状态。"
         fi
       else
         vw_perf_stage_end failed
         stopped_by_script=1
         data_change_started=1
         err "严重错误：自动回滚数据失败！容器保持停止。回滚文件：$rollback_archive"
-        echo "请勿在 1Panel 中启动容器，先检查数据目录和回滚文件。"
+        echo "请勿在 1Panel 或 docker compose 中启动容器，先检查数据目录和回滚文件。"
       fi
       rm -rf -- "$staging" "$temp_root"
       return 1
@@ -1263,7 +1263,7 @@ restore_from_github() (
     vw_perf_stage_end skipped
     vw_perf_stage_begin "restore_health_check_wait"
     vw_perf_stage_end skipped
-    warn "已按你的选择保持容器停止。稍后可在 1Panel → 已安装应用中手动启动。"
+    warn "已按你的选择保持容器停止。稍后可在 1Panel → 已安装应用中，或用 docker start / docker compose start 手动启动。"
   fi
   warn "请登录网页测试原用户、附件、TOTP 与同步。确认一切正常之前，不要删除原数据加密回滚快照：$rollback_archive"
   ok "恢复暂存目录将在退出菜单时自动清理。"
@@ -1364,7 +1364,7 @@ restore_rehearsal() (
   fi
   image="$VW_DETECTED_IMAGE"
   container="$VW_DETECTED_CONTAINER"
-  docker image inspect "$image" >/dev/null 2>&1 || { err "当前镜像在本机不存在：$image。请先在 1Panel 正常更新/拉取后再演练。"; return 1; }
+  docker image inspect "$image" >/dev/null 2>&1 || { err "当前镜像在本机不存在：$image。请先通过 1Panel 或 docker pull 拉取后再演练。"; return 1; }
   temp_root=$(mktemp -d /var/tmp/vw-drill.XXXXXX); chmod 700 "$temp_root"
   vw_require_free_space "$temp_root" "$((MIN_FREE_MB * 1024 * 1024))" "恢复演练下载目录" || return 1
   select_source_archive choose "$temp_root" || return 1
@@ -1493,7 +1493,7 @@ UNIT
     weekly) ok "systemd 自动备份已启用：每周日 VPS 本地时间 $hhmm。" ;;
     monthly) ok "systemd 自动备份已启用：每月 1 日 VPS 本地时间 $hhmm。" ;;
   esac
-  warn "如果以前配置过 1Panel 计划任务，请将旧任务停用，避免同一时间重复备份。"
+  warn "如果以前配置过 1Panel 计划任务或 cron，请将旧任务停用，避免同一时间重复备份。"
   systemctl list-timers --all | grep -E 'NEXT|vw-backup' || true
   pause
 }
@@ -1594,7 +1594,7 @@ preupgrade_backup() {
     && grep -Fxq 'SERVICE_RESTORED=true' "$result_file" \
     && grep -Fxq "BACKUP_TARGET=$BACKUP_TARGET" "$result_file" \
     && grep -Fxq 'REMOTE_VERIFIED=true' "$result_file"; then
-    ok "升级前备份成功。现在可以进入 1Panel → 已安装应用 → Vaultwarden 执行更新。"
+    ok "升级前备份成功。现在可以更新 Vaultwarden（1Panel → 已安装应用，或 docker compose pull && docker compose up -d）。"
     warn "升级后可运行菜单 [03] 检查容器，再观察下一次备份。"
   else
     if [[ -f "$result_file" ]] && grep -Fxq 'STATUS=skipped' "$result_file"; then
@@ -1777,7 +1777,7 @@ view_deployment_manifest() (
   echo "以下清单已经进行脱敏处理，秘密变量值不会显示："
   cat "$temp/manifest.json"
   echo
-  warn "清单用于手动复现 1Panel 应用配置，不包含 SMTP 密码、Admin Token 或其他秘密值。"
+  warn "清单用于手动复现容器部署配置（1Panel / docker compose / docker run），不包含 SMTP 密码、Admin Token 或其他秘密值。"
   pause
 )
 
@@ -1833,11 +1833,11 @@ show_logs() {
 
 show_schedule_help() {
   cat <<'TXT'
-推荐使用 Ubuntu/Debian 原生 systemd timer，不依赖 1Panel 计划任务。
+推荐使用 Ubuntu/Debian 原生 systemd timer，不依赖 1Panel 计划任务或 cron。
 主菜单 [14] 安装/修改自动备份，[15] 查看状态，[16] 暂停，[17] 恢复。
 默认每天 05:20，按 VPS 系统本地时区运行；Persistent=true 可在 VPS 关机错过计划后，于下次启动补执行。
 
-若此前已经在 1Panel 创建同一时间的计划任务，请停用旧任务，避免重复备份。
+若此前已经在 1Panel 或 cron 创建同一时间的计划任务，请停用旧任务，避免重复备份。
 手动执行后台备份：systemctl start vw-backup.service
 查看运行日志：journalctl -u vw-backup.service -n 100
 查看脚本日志：tail -n 100 /var/log/vaultwarden-backup.log
@@ -1916,11 +1916,11 @@ def sep():
 
 print("╭" + "─" * W + "╮")
 row("Vaultwarden 1Panel Backup Manager", "center")
-row(f"v{version} · 1Panel Edition · Ubuntu / Debian", "center")
+row(f"v{version} · 1Panel / Docker Compose / Docker · Ubuntu / Debian", "center")
 row("Powered by OmenTwwnmfm", "center")
 row()
-row("1Panel 负责应用、Docker、HTTPS；本工具负责数据保护与恢复。", "center")
-row("自动备份使用 systemd timer，不依赖 1Panel 计划任务。", "center")
+row("1Panel / Compose 负责应用、Docker、HTTPS；本工具负责数据保护与恢复。", "center")
+row("自动备份使用 systemd timer，不依赖 1Panel 计划任务或 cron。", "center")
 row(f"定时备份目标：{targets.get(target, '未配置')} · 自动备份：{timer}", "center")
 backup = result.get("FINISHED_AT", "未记录")
 run_target = targets.get(result.get("BACKUP_TARGET"), "未知目标")

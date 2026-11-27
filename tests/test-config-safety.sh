@@ -50,6 +50,7 @@ fi
 
 # A menu save that changed RETENTION_DAYS while a worker still holds stale
 # values must not be lost when the worker records a new container name.
+# shellcheck disable=SC2034 # stale caller values that vw_update_config_values must not write back
 CONTAINER=old RETENTION_DAYS=30 NTFY_URL=https://ntfy.example/topic
 printf 'CONTAINER=old\nDATA_DIR=/srv/data\nNOTIFY_METHOD=ntfy\nNTFY_URL=https://ntfy.example/topic\nRETENTION_DAYS=90\n' > "$CONFIG_FILE"
 vw_update_config_values "CONTAINER=new-container" "DATA_DIR=/srv/data"
@@ -62,6 +63,7 @@ if vw_update_config_values "NOT_A_SETTING=1" 2>/dev/null; then echo "FAIL: unkno
 if vw_update_config_values "CONTAINER" 2>/dev/null; then echo "FAIL: assignment without value accepted" >&2; exit 1; fi
 value_with_space='a b $(touch '"$TMP"'/pwned)'
 vw_update_config_values "CONTAINER_MATCH=$value_with_space"
+# shellcheck source=/dev/null
 ( set +u; source "$CONFIG_FILE"; [[ "$CONTAINER_MATCH" == "$value_with_space" ]] ) || { echo "FAIL: value was not shell-escaped" >&2; exit 1; }
 [[ ! -e "$TMP/pwned" ]] || { echo "FAIL: config value was executed" >&2; exit 1; }
 echo "PASS: partial config updates preserve concurrent settings and stay escaped"

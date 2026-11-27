@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Simple launcher for the interactive 1Panel Vaultwarden backup manager.
+# Simple launcher for the interactive Vaultwarden backup manager (1Panel / Docker).
 set -Eeuo pipefail
 
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
