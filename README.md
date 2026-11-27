@@ -38,26 +38,6 @@ sudo bash ./run.sh
 
 启动后先选 `[01]` 完成首次配置（识别容器与 `/data` 路径、设置 age 公钥和备份目标），再选 `[02]` 做第一次手动备份。之后在任意目录执行 `vbm` 即可进入菜单。完整步骤见 [快速开始](docs/快速开始.md) 和下方「快速开始」章节。
 
-### 从旧仓库名迁移
-
-源码仓库已从 `vaultwarden-1panel-backup-manager` 更名为 `vaultwarden-backup-manager`。GitHub 会把旧地址自动跳转到新地址，已安装的实例**无需任何操作**即可继续使用 `[23]` 更新、`vbm` 命令和定时备份。
-
-如需让本地记录与新名称一致（可选）：
-
-```bash
-cd /opt/vaultwarden-1panel-backup-manager
-sudo git remote set-url origin https://github.com/OmenTwwnmfm/vaultwarden-backup-manager.git
-```
-
-安装目录可以继续保留为 `/opt/vaultwarden-1panel-backup-manager`。如果想改成新目录，移动后在新目录执行一次 `sudo bash ./run.sh`，让启动器重新安装指向新路径的 `vbm`，再用 `[22]` 同步后台脚本：
-
-```bash
-sudo mv /opt/vaultwarden-1panel-backup-manager /opt/vaultwarden-backup-manager
-cd /opt/vaultwarden-backup-manager && sudo bash ./run.sh
-```
-
-配置文件 `/etc/vaultwarden-backup.conf`、备份目录、age / SSH 密钥和 systemd 定时器都不依赖源码目录名，不受影响。
-
 ## 操作确认输入
 
 所有需要输入 `YES` 的风险确认均已统一为大小写不敏感：输入 `yes`、`YES` 或 `Yes` 都可以继续；其他输入均取消。不会因为大小写不同而误取消操作。
