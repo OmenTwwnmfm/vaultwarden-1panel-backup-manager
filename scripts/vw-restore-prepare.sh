@@ -106,9 +106,20 @@ MIN_FREE_MB="${VW_MIN_FREE_MB:-${MIN_FREE_MB:-512}}"
 STAGING_PARENT=$(dirname -- "$STAGING")
 [[ -d "$STAGING_PARENT" ]] || { echo "错误：恢复暂存目录的父目录不存在：$STAGING_PARENT" >&2; exit 1; }
 AVAILABLE_BYTES=$(df -PB1 -- "$STAGING_PARENT" | awk 'NR == 2 {print $4}')
-REQUIRED_BYTES=$((ARCHIVE_DATA_BYTES + MIN_FREE_MB * 1024 * 1024))
+STAGING_FS=$(stat -f -c '%T' -- "$STAGING_PARENT" 2>/dev/null || true)
+if [[ "$STAGING_FS" == tmpfs ]]; then
+  # tmpfs is sized from RAM and is released when staging is removed, so the
+  # persistent-disk reserve (MIN_FREE_MB) does not apply; keep a small margin.
+  TMPFS_RESERVE_MB="${VW_TMPFS_RESERVE_MB:-32}"
+  [[ "$TMPFS_RESERVE_MB" =~ ^[0-9]+$ ]] || { echo "错误：tmpfs 预留空间配置无效。" >&2; exit 1; }
+  RESERVE_BYTES=$((TMPFS_RESERVE_MB * 1024 * 1024))
+  if (( ARCHIVE_DATA_BYTES / 10 > RESERVE_BYTES )); then RESERVE_BYTES=$((ARCHIVE_DATA_BYTES / 10)); fi
+else
+  RESERVE_BYTES=$((MIN_FREE_MB * 1024 * 1024))
+fi
+REQUIRED_BYTES=$((ARCHIVE_DATA_BYTES + RESERVE_BYTES))
 if [[ ! "$AVAILABLE_BYTES" =~ ^[0-9]+$ ]] || (( AVAILABLE_BYTES < REQUIRED_BYTES )); then
-  echo "错误：恢复暂存分区空间不足。展开数据约 ${ARCHIVE_DATA_BYTES} bytes，另需保留 ${MIN_FREE_MB} MiB 可用空间。" >&2
+  echo "错误：恢复暂存分区空间不足。展开数据约 ${ARCHIVE_DATA_BYTES} bytes，另需保留 $((RESERVE_BYTES / 1024 / 1024)) MiB 可用空间（当前可用 ${AVAILABLE_BYTES:-未知} bytes）。" >&2
   exit 1
 fi
 

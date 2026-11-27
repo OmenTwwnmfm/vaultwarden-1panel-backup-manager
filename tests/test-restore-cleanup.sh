@@ -54,4 +54,13 @@ mkdir "$TMP/existing"
 touch "$TMP/existing/preserve"
 if VW_TEST_FAIL=none bash "$ROOT/scripts/vw-restore-prepare.sh" "$TMP/$archive_name" "$TMP/identity" "$TMP/existing" > "$TMP/log" 2>&1; then exit 1; fi
 [[ -f "$TMP/existing/preserve" ]]
+if VW_TEST_FAIL=none VW_MIN_FREE_MB=99999999 VW_ALLOW_UNSIGNED=1 bash "$ROOT/scripts/vw-restore-prepare.sh" "$TMP/$archive_name" "$TMP/identity" "$TMP/disk-reserve" > "$TMP/log" 2>&1; then cat "$TMP/log"; exit 1; fi
+grep -q '空间不足' "$TMP/log" || { cat "$TMP/log"; exit 1; }
+if [[ "$(uname -s)" == Linux && "$(stat -f -c '%T' /dev/shm 2>/dev/null || true)" == tmpfs ]]; then
+  SHM_TMP="$(mktemp -d /dev/shm/vw-test-restore.XXXXXX)"
+  trap 'rm -rf -- "$TMP" "$SHM_TMP"' EXIT
+  VW_TEST_FAIL=none VW_MIN_FREE_MB=99999999 VW_ALLOW_UNSIGNED=1 bash "$ROOT/scripts/vw-restore-prepare.sh" "$TMP/$archive_name" "$TMP/identity" "$SHM_TMP/staging" > "$TMP/log" 2>&1 || { cat "$TMP/log"; exit 1; }
+  [[ -f "$SHM_TMP/staging/data/db.sqlite3" ]] || { cat "$TMP/log"; exit 1; }
+  if VW_TEST_FAIL=none VW_TMPFS_RESERVE_MB=99999999 VW_ALLOW_UNSIGNED=1 bash "$ROOT/scripts/vw-restore-prepare.sh" "$TMP/$archive_name" "$TMP/identity" "$SHM_TMP/too-big" > "$TMP/log" 2>&1; then cat "$TMP/log"; exit 1; fi
+fi
 echo 'PASS: restore failures clean only their own staging directory'
