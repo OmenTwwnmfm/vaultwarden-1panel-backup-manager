@@ -38,8 +38,14 @@ VW_TEST_REAL_TAR="$(command -v tar)"
 export VW_TEST_REAL_TAR PYTHONUTF8=1
 chmod +x "$TMP/bin/"*
 export PATH="$TMP/bin:$PATH"
+sigint_ignored() {
+  local mask
+  mask=$(awk '/^SigIgn:/ {print $2}' /proc/$$/status 2>/dev/null) || return 1
+  [[ -n "$mask" ]] && (( 16#$mask & 2 ))
+}
 for scenario in tar sqlite term interrupt success; do
   if [[ "$scenario" == term || "$scenario" == interrupt ]] && [[ "$(uname -s)" != Linux ]]; then continue; fi
+  if [[ "$scenario" == interrupt ]] && sigint_ignored; then echo 'SKIP: SIGINT is ignored in this (background) shell'; continue; fi
   result=0
   VW_TEST_FAIL="$scenario" VW_MIN_FREE_MB=0 VW_ALLOW_UNSIGNED=1 bash "$ROOT/scripts/vw-restore-prepare.sh" "$TMP/$archive_name" "$TMP/identity" "$TMP/$scenario" > "$TMP/log" 2>&1 || result=$?
   if [[ "$scenario" == success ]]; then
