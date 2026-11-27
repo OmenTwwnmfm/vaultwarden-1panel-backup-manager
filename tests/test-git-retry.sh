@@ -8,6 +8,8 @@ mkdir -p "$TMP/bin" "$TMP/backup" "$TMP/tmp"
 
 git init --quiet --bare --initial-branch=main "$TMP/remote.git"
 git clone --quiet "$TMP/remote.git" "$TMP/seed"
+# git < 2.31 names an empty clone's branch after init.defaultBranch, not the remote HEAD.
+git -C "$TMP/seed" symbolic-ref HEAD refs/heads/main
 git -C "$TMP/seed" config user.name Tester
 git -C "$TMP/seed" config user.email test@example.invalid
 printf 'seed\n' > "$TMP/seed/README"
