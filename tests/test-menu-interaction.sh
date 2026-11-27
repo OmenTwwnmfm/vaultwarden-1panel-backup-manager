@@ -4,6 +4,7 @@ set -Eeuo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP=$(mktemp -d)
 trap 'rm -rf -- "$TMP"' EXIT
+VW_TEST_REAL_PYTHON="$(command -v python || command -v python3)"
 
 sed -n '/^show_backup_locations() {/,/^}/p; /^choose_backup_name() {/,/^}/p; /^manage_backup_history() {/,/^}/p; /^manage_history() (/,/^)/p; /^render_main_menu() {/,/^}/p; /^main_menu() {/,/^}/p' "$ROOT/scripts/vw-manager.sh" > "$TMP/functions.sh"
 source "$TMP/functions.sh"
@@ -37,7 +38,7 @@ pause() {
   read -r _ || true
 }
 python3() {
-  if [[ "$1" == - ]]; then PYTHONUTF8=1 python "$@"; return; fi
+  if [[ "$1" == - ]]; then PYTHONUTF8=1 "$VW_TEST_REAL_PYTHON" "$@"; return; fi
   [[ "$1" == "$STORAGE_TOOL" ]] || return 1
   case "$2" in
     --config)

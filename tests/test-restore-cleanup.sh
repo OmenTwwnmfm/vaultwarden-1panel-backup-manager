@@ -28,9 +28,11 @@ case "$VW_TEST_FAIL" in
   interrupt) kill -INT "$PPID" ;;
 esac
 TAR
+VW_TEST_REAL_PYTHON="$(command -v python || command -v python3)"
+export VW_TEST_REAL_PYTHON
 cat > "$TMP/bin/python3" <<'PYTHON'
 #!/usr/bin/env bash
-exec python "$@"
+exec "$VW_TEST_REAL_PYTHON" "$@"
 PYTHON
 VW_TEST_REAL_TAR="$(command -v tar)"
 export VW_TEST_REAL_TAR PYTHONUTF8=1

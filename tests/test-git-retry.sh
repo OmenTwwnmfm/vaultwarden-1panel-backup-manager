@@ -77,7 +77,8 @@ vw_require_free_space() { return 0; }
 upload_snapshot github "$BACKUP_DIR/$archive_name"
 
 git -C "$TMP/repo" show-ref --verify --quiet refs/heads/main
-git -C "$TMP/repo" log --oneline --all | grep -Fq 'Concurrent remote change'
+history="$(git -C "$TMP/repo" log --oneline --all)"
+grep -Fq 'Concurrent remote change' <<<"$history"
 git -C "$TMP/remote.git" show refs/heads/main:README >/dev/null
 git -C "$TMP/remote.git" show "refs/heads/main:$archive_name" >/dev/null
 git -C "$TMP/remote.git" show refs/heads/main:remote-change.txt >/dev/null

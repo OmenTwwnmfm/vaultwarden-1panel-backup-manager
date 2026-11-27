@@ -6,9 +6,11 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf -- "$TMP"' EXIT
 mkdir -p "$TMP/bin" "$TMP/etc"
+VW_TEST_REAL_PYTHON="$(command -v python || command -v python3)"
+export VW_TEST_REAL_PYTHON
 cat > "$TMP/bin/python3" <<'PYTHON'
 #!/usr/bin/env bash
-exec python "$@"
+exec "$VW_TEST_REAL_PYTHON" "$@"
 PYTHON
 chmod +x "$TMP/bin/python3"
 command -v flock >/dev/null 2>&1 || { printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/bin/flock"; chmod +x "$TMP/bin/flock"; }

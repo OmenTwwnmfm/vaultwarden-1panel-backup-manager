@@ -72,6 +72,8 @@ cat > "$TMP/bin/flock" <<'FLOCK'
 #!/usr/bin/env bash
 exit 0
 FLOCK
+VW_TEST_REAL_PYTHON="$(command -v python || command -v python3)"
+export VW_TEST_REAL_PYTHON
 cat > "$TMP/bin/python3" <<'PYTHON'
 #!/usr/bin/env bash
 case "$1" in
@@ -84,7 +86,7 @@ case "$1" in
     esac
     ;;
   *vw-manifest.py) printf '{}\n' > "$3" ;;
-  *) exec python "$@" ;;
+  *) exec "$VW_TEST_REAL_PYTHON" "$@" ;;
 esac
 PYTHON
 cat > "$TMP/bin/mktemp" <<'MKTEMP'

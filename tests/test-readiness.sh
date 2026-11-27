@@ -44,9 +44,11 @@ cat > "$TMP/bin/flock" <<'FAKEFLOCK'
 #!/usr/bin/env bash
 exit 0
 FAKEFLOCK
+VW_TEST_REAL_PYTHON="$(command -v python || command -v python3)"
+export VW_TEST_REAL_PYTHON
 cat > "$TMP/bin/python3" <<'FAKEPYTHON'
 #!/usr/bin/env bash
-exec python "$@"
+exec "$VW_TEST_REAL_PYTHON" "$@"
 FAKEPYTHON
 chmod +x "$TMP/bin/docker"
 chmod +x "$TMP/bin/flock"

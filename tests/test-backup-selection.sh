@@ -6,9 +6,11 @@ TMP="$(mktemp -d)"
 trap 'rm -rf -- "$TMP"' EXIT
 mkdir -p "$TMP/bin" "$TMP/backups" "$TMP/select"
 export PYTHONUTF8=1
+VW_TEST_REAL_PYTHON="$(command -v python || command -v python3)"
+export VW_TEST_REAL_PYTHON
 cat > "$TMP/bin/python3" <<'PYTHON'
 #!/usr/bin/env bash
-exec python "$@"
+exec "$VW_TEST_REAL_PYTHON" "$@"
 PYTHON
 chmod +x "$TMP/bin/python3"
 PATH="$TMP/bin:$PATH"
