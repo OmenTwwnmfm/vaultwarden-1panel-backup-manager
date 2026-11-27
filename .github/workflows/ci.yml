@@ -37,21 +37,26 @@ jobs:
 
   python-minimum:
     # Debian 11 ships Python 3.9 and Ubuntu 22.04 ships 3.10; keep both working.
+    # Run in the official Python images: newer hosted runners no longer
+    # provide 3.9 through setup-python.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.9", "3.10"]
+    container: python:${{ matrix.python-version }}-slim
     steps:
+      - name: Install test dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates git openssh-client
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
       - name: Run Python tests
         run: |
-          python -B tests/test-archive-check.py
-          python -B tests/test-storage.py
-          python -B -m compileall -q scripts tests
+          python --version
+          useradd --create-home tester
+          chown -R tester "$GITHUB_WORKSPACE"
+          su tester -c 'cd "$GITHUB_WORKSPACE" && python -B tests/test-archive-check.py && python -B tests/test-storage.py && python -B -m compileall -q scripts tests'
 
   distro:
     # Verify stat/find/tar/sqlite3/coreutils behaviour on supported releases.
@@ -64,7 +69,11 @@ jobs:
     steps:
       - name: Install test dependencies
         run: |
-          apt-get update
+          if ! apt-get update; then
+            # Debian 11 is end-of-life; its packages moved to archive.debian.org.
+            sed -i -e 's|deb.debian.org|archive.debian.org|g' -e 's|security.debian.org|archive.debian.org|g' -e '/-updates/d' /etc/apt/sources.list
+            apt-get -o Acquire::Check-Valid-Until=false update
+          fi
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             bash ca-certificates coreutils findutils gawk git gzip python3 python-is-python3 sqlite3 tar util-linux openssh-client
       - uses: actions/checkout@v4
