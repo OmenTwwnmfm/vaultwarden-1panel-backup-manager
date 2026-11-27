@@ -356,6 +356,8 @@ class WebDAV:
             try:
                 self.small_request("MKCOL")
             except WebDAVStatusError as create_error:
+                if create_error.status == 409:
+                    raise ValueError("WebDAV 上级目录不存在：请先在 WebDAV 服务端创建所填写的目录，工具只会在其下自动创建 vbm 子目录") from create_error
                 if create_error.status not in (405, 409):
                     raise
             content = self.small_request("PROPFIND", body=body, headers=headers)
