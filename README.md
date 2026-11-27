@@ -7,12 +7,12 @@
 面向 Ubuntu / Debian 上通过 Docker 部署（1Panel 应用商店、docker compose 或 docker run）的 Vaultwarden（SQLite）
 
 ![Platform](https://img.shields.io/badge/platform-Ubuntu%20%7C%20Debian-blue)
-![Panel](https://img.shields.io/badge/panel-1Panel-1677ff)
+![Deploy](https://img.shields.io/badge/deploy-1Panel%20%7C%20Compose%20%7C%20Docker-1677ff)
 ![Encryption](https://img.shields.io/badge/encryption-age-16a34a)
 ![Scheduler](https://img.shields.io/badge/scheduler-systemd-6d28d9)
 ![Version](https://img.shields.io/badge/version-1.6.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Tests](https://github.com/OmenTwwnmfm/vaultwarden-1panel-backup-manager/actions/workflows/ci.yml/badge.svg)
+![Tests](https://github.com/OmenTwwnmfm/vaultwarden-backup-manager/actions/workflows/ci.yml/badge.svg)
 
 </div>
 
@@ -31,12 +31,32 @@ Vaultwarden 将用户密码库保存在自己的服务器上，因此需要可�
 ## 先跑起来（3 分钟）
 
 ```bash
-sudo git clone https://github.com/OmenTwwnmfm/vaultwarden-1panel-backup-manager.git /opt/vaultwarden-1panel-backup-manager
-cd /opt/vaultwarden-1panel-backup-manager
+sudo git clone https://github.com/OmenTwwnmfm/vaultwarden-backup-manager.git /opt/vaultwarden-backup-manager
+cd /opt/vaultwarden-backup-manager
 sudo bash ./run.sh
 ```
 
 启动后先选 `[01]` 完成首次配置（识别容器与 `/data` 路径、设置 age 公钥和备份目标），再选 `[02]` 做第一次手动备份。之后在任意目录执行 `vbm` 即可进入菜单。完整步骤见 [快速开始](docs/快速开始.md) 和下方「快速开始」章节。
+
+### 从旧仓库名迁移
+
+源码仓库已从 `vaultwarden-1panel-backup-manager` 更名为 `vaultwarden-backup-manager`。GitHub 会把旧地址自动跳转到新地址，已安装的实例**无需任何操作**即可继续使用 `[23]` 更新、`vbm` 命令和定时备份。
+
+如需让本地记录与新名称一致（可选）：
+
+```bash
+cd /opt/vaultwarden-1panel-backup-manager
+sudo git remote set-url origin https://github.com/OmenTwwnmfm/vaultwarden-backup-manager.git
+```
+
+安装目录可以继续保留为 `/opt/vaultwarden-1panel-backup-manager`。如果想改成新目录，移动后在新目录执行一次 `sudo bash ./run.sh`，让启动器重新安装指向新路径的 `vbm`，再用 `[22]` 同步后台脚本：
+
+```bash
+sudo mv /opt/vaultwarden-1panel-backup-manager /opt/vaultwarden-backup-manager
+cd /opt/vaultwarden-backup-manager && sudo bash ./run.sh
+```
+
+配置文件 `/etc/vaultwarden-backup.conf`、备份目录、age / SSH 密钥和 systemd 定时器都不依赖源码目录名，不受影响。
 
 ## 操作确认输入
 
@@ -194,8 +214,8 @@ Vaultwarden_1Panel_GitHub_Project/
 ```bash
 sudo apt update
 sudo apt install -y git
-sudo git clone https://github.com/OmenTwwnmfm/vaultwarden-1panel-backup-manager.git /opt/vaultwarden-1panel-backup-manager
-cd /opt/vaultwarden-1panel-backup-manager
+sudo git clone https://github.com/OmenTwwnmfm/vaultwarden-backup-manager.git /opt/vaultwarden-backup-manager
+cd /opt/vaultwarden-backup-manager
 sudo bash ./run.sh
 ```
 
