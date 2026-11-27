@@ -2020,7 +2020,7 @@ main_menu() {
       20) generate_diagnostics || pause ;;
       21) configure_backup_policy || pause ;;
       22) update_installed_scripts || pause ;;
-      23) check_for_project_updates; pause ;;
+      23) check_for_project_updates || warn "本次未更新项目源码。"; pause ;;
       0|00) echo "已退出。"; exit 0 ;;
       *) warn "无效选项，请输入 00-23。"; sleep 1 ;;
     esac
