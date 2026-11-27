@@ -1,5 +1,13 @@
 # 更新日志
 
+## v1.6.1 - 仓库更名后的文档与 CI 修复
+
+- 文档：GitHub 仓库已更名为 `vaultwarden-backup-manager`。README、快速开始和完整使用手册中的克隆地址、推荐安装路径 `/opt/vaultwarden-backup-manager` 和 CI 徽章同步更新；README 新增「从旧仓库名迁移」，说明已安装实例无需任何操作，以及可选的 remote 与目录迁移步骤。部署方式徽章改为 1Panel / Compose / Docker。
+- CI：Debian 11 已停止支持，其安全更新从 deb.debian.org 下线（索引仍能更新，但下载包返回 404）。现在 bullseye 的安全源固定使用 archive.debian.org，Debian 系统装包失败时整体切换到 archive 源再试一次。
+- 测试：`test-git-retry` 的种子克隆显式切到 `main` 分支。git 2.31 之前克隆空仓库时会使用本地默认分支名，导致 Debian 11（git 2.30）上测试失败。GitHub Actions 全部任务（含 Debian 11/12、Ubuntu 22.04/24.04、Python 3.9/3.10）均已通过。
+
+升级：备份、恢复等功能与配置文件格式均未变化。`git pull` 或菜单 `[23]` 更新源码后，运行一次 `[22]` 同步后台脚本中的版本号。
+
 ## v1.6.0 - 支持非 1Panel 部署，生产级真机验证
 
 - 更名：项目名称由 Vaultwarden 1Panel Backup Manager 改为 Vaultwarden Backup Manager，GitHub 仓库由 `vaultwarden-1panel-backup-manager` 更名为 `vaultwarden-backup-manager`（旧地址自动跳转）。菜单标题、文档、克隆地址、推荐安装路径和 `.keep` 保护标记同步更新。命令 `vbm`、配置文件、后台脚本路径和定时器不变，已安装实例无需迁移，详见 README「从旧仓库名迁移」。

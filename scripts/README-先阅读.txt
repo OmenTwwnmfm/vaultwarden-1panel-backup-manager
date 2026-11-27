@@ -1,4 +1,4 @@
-Vaultwarden Backup Manager v1.6.0
+Vaultwarden Backup Manager v1.6.1
 =======================================
 
 适用环境

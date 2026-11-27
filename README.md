@@ -10,7 +10,7 @@
 ![Deploy](https://img.shields.io/badge/deploy-1Panel%20%7C%20Compose%20%7C%20Docker-1677ff)
 ![Encryption](https://img.shields.io/badge/encryption-age-16a34a)
 ![Scheduler](https://img.shields.io/badge/scheduler-systemd-6d28d9)
-![Version](https://img.shields.io/badge/version-1.6.0-blue)
+![Version](https://img.shields.io/badge/version-1.6.1-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Tests](https://github.com/OmenTwwnmfm/vaultwarden-backup-manager/actions/workflows/ci.yml/badge.svg)
 
