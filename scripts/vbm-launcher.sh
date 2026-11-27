@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Installed by Vaultwarden 1Panel Backup Manager as /usr/local/bin/vbm.
+# Installed by Vaultwarden Backup Manager as /usr/local/bin/vbm.
 set -Eeuo pipefail
 PROJECT_RUNNER=__VBM_PROJECT_RUNNER__
 if [[ ! -f "$PROJECT_RUNNER" ]]; then

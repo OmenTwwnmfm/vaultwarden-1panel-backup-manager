@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared helpers for Vaultwarden 1Panel Backup Manager.
+# Shared helpers for Vaultwarden Backup Manager.
 set -Eeuo pipefail
 
 vw_error() { printf '[错误] %s\n' "$*" >&2; }

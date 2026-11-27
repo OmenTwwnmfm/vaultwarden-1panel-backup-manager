@@ -5,7 +5,7 @@ set -Eeuo pipefail
 umask 077
 unset VW_CONFIG_FILE VW_LOG_FILE VW_LOCK_FILE VW_STATE_DIR VW_COMMON_LIB VW_MANIFEST_TOOL VW_ARCHIVE_CHECK_TOOL VW_MIN_FREE_MB VW_PERF_FILE VW_PERF_LOCK_FILE VW_DIAG_REPORT_DIR
 
-VERSION="1.5.4"
+VERSION="1.6.0"
 CONFIG_FILE="/etc/vaultwarden-backup.conf"
 BACKUP_SCRIPT="/usr/local/sbin/vw-backup.sh"
 RESTORE_SCRIPT="/usr/local/sbin/vw-restore-prepare.sh"
@@ -1715,7 +1715,7 @@ manage_history() (
   case "$action" in
     1)
       if [[ -e "$repo_tmp/$file.keep" ]]; then warn "该备份已经标记为永久保留。"; pause; return 0; fi
-      marker_content="Protected by Vaultwarden 1Panel Backup Manager on $(date '+%F %T %Z'). This marker keeps this backup in the current Git branch and local retention cleanup."
+      marker_content="Protected by Vaultwarden Backup Manager on $(date '+%F %T %Z'). This marker keeps this backup in the current Git branch and local retention cleanup."
       printf '%s\n' "$marker_content" > "$repo_tmp/$file.keep"
       if [[ -f "$repo_tmp/$manifest" ]]; then printf '%s\n' "$marker_content" > "$repo_tmp/$manifest.keep"; fi
       confirm_yes_upper "确认将 $file 标记为永久保留？自动过期清理会跳过此备份。" || { warn "已取消。"; return 0; }
@@ -1915,7 +1915,7 @@ def sep():
     print("├" + "─" * W + "┤")
 
 print("╭" + "─" * W + "╮")
-row("Vaultwarden 1Panel Backup Manager", "center")
+row("Vaultwarden Backup Manager", "center")
 row(f"v{version} · 1Panel / Docker Compose / Docker · Ubuntu / Debian", "center")
 row("Powered by OmenTwwnmfm", "center")
 row()

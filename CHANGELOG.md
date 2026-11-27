@@ -1,5 +1,17 @@
 # 更新日志
 
+## v1.6.0 - 支持非 1Panel 部署，生产级真机验证
+
+- 更名：项目显示名称由 Vaultwarden 1Panel Backup Manager 改为 Vaultwarden Backup Manager，菜单标题、文档和 `.keep` 保护标记同步更新。命令 `vbm`、配置文件和后台脚本路径不变。
+- 新功能：除 1Panel 应用商店外，正式支持 `docker compose` 和 `docker run`（bind mount 或 Docker 命名卷）部署的 Vaultwarden。容器发现、数据目录识别、备份、验证、恢复、隔离演练和部署清单都适用于三种方式。部署清单的 `deployment.type` 分别记录为 `1panel` / `docker-compose` / `docker`，compose 部署还会记录项目名、配置文件路径和服务名。多容器主机上，向导会列出全部候选容器供选择；也可以用已有配置 `CONTAINER_MATCH` 限定候选范围。
+- 修复：`[05]` 验证、`[09]` 隔离演练等把明文暂存在 `/dev/shm` tmpfs 时，空间检查错误沿用了磁盘的 `MIN_FREE_MB`（默认 512 MiB）。小内存 VPS 的 tmpfs 通常不到 512 MiB，所以这些操作一直报"恢复暂存分区空间不足"。现在 tmpfs 暂存只要求"展开大小 + max(展开大小的 10%, 32 MiB)"，余量可通过 `VW_TMPFS_RESERVE_MB` 调整；磁盘暂存仍使用 `MIN_FREE_MB`。
+- 修复：WebDAV 父目录不存在时，提示具体原因，不再只报 404。
+- 修复：项目更新检查失败（网络不可达等）时，菜单继续运行，不再退出。
+- 测试：测试替身先解析真实 Python 路径，再覆盖 `python3`；修复 `test-git-retry` 的 SIGPIPE 偶发失败；磁盘保留空间用例改在非 tmpfs 目录上运行；shell 忽略 SIGINT 时跳过 SIGINT 恢复用例；新增 tmpfs 暂存空间回归测试。
+- 实测：在 Ubuntu 26.04.1 LTS 上用 Vaultwarden 1.37.5 对三种部署方式完成端到端真机测试，详见 [支持矩阵](docs/支持矩阵.md)。
+
+升级：`git pull` 或菜单 `[23]` 更新源码后，运行 `[22]` 同步后台脚本。配置文件格式向后兼容，原有 1Panel 配置无需修改。
+
 ## v1.5.4 - 测试与 CI 兼容性修复
 
 - 测试：`tests/test-storage.py` 不再使用 Python 3.10 才支持的 `Path.write_text(newline=)`，改为直接写入字节，Python 3.9（Debian 11）下测试可以通过。
