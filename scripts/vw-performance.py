@@ -3,6 +3,8 @@
 from __future__ import annotations
 import argparse
 import csv
+import gzip
+import io
 import statistics
 import sys
 from collections import defaultdict
@@ -57,24 +59,47 @@ STAGE_LABELS = {
     "TOTAL": "总耗时",
 }
 
+def _parse_rows(handle):
+    rows = []
+    reader = csv.DictReader(handle, delimiter="\t")
+    for row in reader:
+        # Normalize to the known fields so a damaged or hand-edited
+        # header cannot make later row["..."] accesses raise KeyError.
+        row = {field: (row.get(field) or "") for field in FIELDS}
+        try:
+            row["duration_ms"] = int(row.get("duration_ms") or 0)
+            row["bytes"] = int(row.get("bytes") or 0)
+        except ValueError:
+            continue
+        if row.get("run_id") and row.get("stage"):
+            rows.append(row)
+    return rows
+
 def read_rows(path: Path):
     if not path.exists():
         return []
-    rows = []
+    if path.suffix == ".gz":
+        try:
+            with gzip.open(path, "rb") as raw:
+                return _parse_rows(io.TextIOWrapper(raw, encoding="utf-8", newline=""))
+        except (OSError, EOFError, UnicodeDecodeError):
+            return []
     with path.open("r", encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle, delimiter="\t")
-        for row in reader:
-            # Normalize to the known fields so a damaged or hand-edited
-            # header cannot make later row["..."] accesses raise KeyError.
-            row = {field: (row.get(field) or "") for field in FIELDS}
-            try:
-                row["duration_ms"] = int(row.get("duration_ms") or 0)
-                row["bytes"] = int(row.get("bytes") or 0)
-            except ValueError:
-                continue
-            if row.get("run_id") and row.get("stage"):
-                rows.append(row)
-    return rows
+        return _parse_rows(handle)
+
+def rotated_predecessor(path: Path):
+    """Return the newest logrotate copy (performance.tsv.1 or .1.gz), if any."""
+    for candidate in (path.with_name(path.name + ".1"), path.with_name(path.name + ".1.gz")):
+        if candidate.is_file() and not candidate.is_symlink():
+            return candidate
+    return None
+
+def read_history(path: Path):
+    # logrotate moves the history away monthly; prepend the last rotated copy
+    # so "recent 30 runs" statistics do not reset at the start of each month.
+    previous = rotated_predecessor(path)
+    rows = read_rows(previous) if previous else []
+    return rows + read_rows(path)
 
 def fmt(ms: int) -> str:
     return f"{ms/1000:.3f}s"
@@ -87,7 +112,7 @@ def main():
     ap.add_argument("--csv", metavar="OUTPUT", help="export all rows as CSV")
     args = ap.parse_args()
     path = Path(args.file)
-    rows = read_rows(path)
+    rows = read_history(path)
     if not rows:
         if path.exists():
             print(f"性能记录文件存在，但目前只有表头或没有有效记录：{path}")

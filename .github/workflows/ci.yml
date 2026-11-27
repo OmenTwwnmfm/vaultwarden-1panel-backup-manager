@@ -24,6 +24,8 @@ jobs:
           for script in run.sh scripts/*.sh tests/*.sh; do bash -n "$script"; done
       - name: Run ShellCheck
         run: shellcheck --severity=error run.sh scripts/*.sh tests/*.sh
+      - name: Report ShellCheck warnings (baseline, non-blocking)
+        run: shellcheck --severity=warning run.sh scripts/*.sh tests/*.sh || echo "::warning::ShellCheck warnings present; see log"
       - name: Run shell tests
         run: |
           for test in tests/*.sh; do bash "$test"; done
@@ -32,3 +34,46 @@ jobs:
           python -B tests/test-archive-check.py
           python -B tests/test-storage.py
           python -B -m compileall -q scripts tests
+
+  python-minimum:
+    # Debian 11 ships Python 3.9 and Ubuntu 22.04 ships 3.10; keep both working.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Run Python tests
+        run: |
+          python -B tests/test-archive-check.py
+          python -B tests/test-storage.py
+          python -B -m compileall -q scripts tests
+
+  distro:
+    # Verify stat/find/tar/sqlite3/coreutils behaviour on supported releases.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["debian:11", "debian:12", "ubuntu:22.04", "ubuntu:24.04"]
+    container: ${{ matrix.image }}
+    steps:
+      - name: Install test dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            bash ca-certificates coreutils findutils gawk git gzip python3 python-is-python3 sqlite3 tar util-linux openssh-client
+      - uses: actions/checkout@v4
+      - name: Run shell tests
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          useradd --create-home tester
+          chown -R tester "$GITHUB_WORKSPACE"
+          su tester -c 'cd "$GITHUB_WORKSPACE" && for test in tests/*.sh; do echo "== $test"; bash "$test" || exit 1; done'
+      - name: Run Python tests
+        run: |
+          su tester -c 'cd "$GITHUB_WORKSPACE" && python3 -B tests/test-archive-check.py && python3 -B tests/test-storage.py'

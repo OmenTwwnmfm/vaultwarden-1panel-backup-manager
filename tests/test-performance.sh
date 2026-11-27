@@ -64,3 +64,20 @@ for expected in "停止 Vaultwarden 容器" "SQLite quick_check" "完整 /data �
   grep -q "$expected" <<<"$REPORT" || { echo "FAIL: report missing label: $expected" >&2; exit 1; }
 done
 echo "PASS: performance report includes stage breakdown and bottleneck"
+
+# logrotate moves history away monthly; the report must keep counting the
+# last rotated copy (plain .1 or compressed .1.gz).
+ROTATED="$TMP/rotated"
+mkdir -p "$ROTATED"
+{
+  printf 'timestamp\toperation\trun_id\tstage\tduration_ms\tstatus\tbytes\n'
+  for index in 1 2 3; do printf '2026-10-0%s 05:20:00 UTC\tbackup\told-run-%s\tTOTAL\t1000\tsuccess\t0\n' "$index" "$index"; done
+} > "$ROTATED/performance.tsv.1"
+gzip -c "$ROTATED/performance.tsv.1" > "$ROTATED/performance.tsv.1.gz"
+cp -- "$VW_PERF_FILE" "$ROTATED/performance.tsv"
+REPORT=$(python3 "$ROOT/scripts/vw-performance.py" "$ROTATED/performance.tsv")
+grep -q '历史运行次数：4' <<<"$REPORT" || { echo "FAIL: rotated .1 history was not included" >&2; echo "$REPORT" >&2; exit 1; }
+rm -- "$ROTATED/performance.tsv.1"
+REPORT=$(python3 "$ROOT/scripts/vw-performance.py" "$ROTATED/performance.tsv")
+grep -q '历史运行次数：4' <<<"$REPORT" || { echo "FAIL: rotated .1.gz history was not included" >&2; echo "$REPORT" >&2; exit 1; }
+echo "PASS: performance report keeps the most recent rotated history"

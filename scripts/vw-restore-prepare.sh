@@ -89,11 +89,17 @@ python3 "$STORAGE_TOOL" verify-signature "$archive_copy" || {
   [[ "$signature_status" == 3 && "${VW_ALLOW_UNSIGNED:-0}" == 1 ]] || exit 1
 }
 ARCHIVE="$archive_copy"
+# The archive is decrypted twice on purpose: the first pass only scans paths
+# and modes without writing anything, the second extracts after the scan has
+# passed. Each pass is timed so a slow restore is not mistaken for a defect.
+pass_seconds() { printf '%s' "$(( $(date +%s) - $1 ))"; }
 echo "正在验证加密归档结构和安全路径..."
+scan_started=$(date +%s)
 if ! ARCHIVE_DATA_BYTES=$(age -d -i "$IDENTITY" "$ARCHIVE" | python3 "$ARCHIVE_CHECK_TOOL"); then
   echo "错误：age 解密、tar 完整性或归档路径安全检查失败。" >&2
   exit 1
 fi
+echo "[耗时] 第 1 遍解密（安全扫描，不落盘）：$(pass_seconds "$scan_started") 秒"
 [[ "$ARCHIVE_DATA_BYTES" =~ ^[0-9]+$ ]] || { echo "错误：无法确定归档展开后的数据大小。" >&2; exit 1; }
 MIN_FREE_MB="${VW_MIN_FREE_MB:-${MIN_FREE_MB:-512}}"
 [[ "$MIN_FREE_MB" =~ ^[0-9]+$ ]] || { echo "错误：恢复空间阈值配置无效。" >&2; exit 1; }
@@ -111,7 +117,9 @@ chmod 700 "$STAGING" "$STAGING/data"
 
 # Second pass streams decrypted bytes directly into tar; no plaintext archive is left on disk.
 echo "正在解密并解压到暂存目录..."
+extract_started=$(date +%s)
 age -d -i "$IDENTITY" "$ARCHIVE" | tar --numeric-owner --same-owner -xzpf - -C "$STAGING/data"
+echo "[耗时] 第 2 遍解密（解压到暂存目录）：$(pass_seconds "$extract_started") 秒"
 unexpected_entry=$(find "$STAGING/data" \( \( ! -type f ! -type d \) -o -type f -links +1 -o -perm /6000 \) -print -quit)
 [[ -z "$unexpected_entry" ]] || { echo "错误：解压目录包含不允许的条目。" >&2; exit 1; }
 rm -f -- "$archive_copy" "$archive_copy.sha256" "$archive_copy.sha256.sig"

@@ -176,10 +176,82 @@ MANIFEST_COMPLETE=false
 MANIFEST_VERIFIED=false
 FINAL_STATUS="failed"
 FAILURE_REASON="backup aborted"
+ALERT_REPEAT_SECONDS=$((24 * 3600))
 
 wait_container_healthy() {
   local name="$1" timeout_s="${2:-120}" delay_s="${3:-2}" consecutive="${4:-2}"
   vw_wait_healthy "$name" "$timeout_s" "$delay_s" "$consecutive"
+}
+
+# Send a monitoring alert at most once per ALERT_REPEAT_SECONDS for the same
+# condition. clear_alert re-arms it once the condition has recovered.
+alert_once() {
+  local key="$1" message="$2" stamp now
+  stamp="$STATE_DIR/alerts/$key"
+  now=$(date +%s)
+  if [[ -f "$stamp" && ! -L "$stamp" ]] && (( now - $(stat -c %Y -- "$stamp") < ALERT_REPEAT_SECONDS )); then
+    echo "INFO: alert already sent within the last 24 hours, suppressed: $key"
+    return 0
+  fi
+  mkdir -p "$STATE_DIR/alerts" && chmod 700 "$STATE_DIR/alerts"
+  vw_notify failure "$message" || true
+  touch -- "$stamp"
+}
+
+clear_alert() {
+  rm -f -- "$STATE_DIR/alerts/$1"
+}
+
+# Runs from on_exit, after this run's result has been recorded, so a run that
+# has just succeeded is not reported as overdue and failed runs still alert.
+check_backup_ages() {
+  [[ "${VW_EXECUTION_MODE:-}" == systemd ]] || return 0
+  local hours="${ALERT_MAX_BACKUP_AGE_HOURS:-}" days="${ALERT_MAX_DRILL_AGE_DAYS:-90}" now timestamp pending_mtimes oldest count=0 repo_kib
+  case "$BACKUP_FREQUENCY" in
+    weekly) hours="${hours:-192}" ;;
+    monthly) hours="${hours:-768}" ;;
+    *) hours="${hours:-36}" ;;
+  esac
+  [[ "$hours" =~ ^[1-9][0-9]{0,4}$ && "$days" =~ ^[1-9][0-9]{0,3}$ ]] || return 0
+  now=$(date +%s)
+  if [[ -f "$STATE_DIR/verified-$BACKUP_TARGET" ]]; then
+    clear_alert "never-verified-$BACKUP_TARGET"
+    timestamp=$(stat -c %Y "$STATE_DIR/verified-$BACKUP_TARGET")
+    if (( now - timestamp > hours * 3600 )); then
+      alert_once "backup-overdue-$BACKUP_TARGET" "Vaultwarden: $BACKUP_TARGET backup verification is overdue."
+    else
+      clear_alert "backup-overdue-$BACKUP_TARGET"
+    fi
+  else
+    alert_once "never-verified-$BACKUP_TARGET" "Vaultwarden: no successful $BACKUP_TARGET verification has been recorded since upgrading."
+  fi
+  touch -a "$STATE_DIR/monitor-start"
+  timestamp=$(stat -c %Y "$STATE_DIR/drill-verified" 2>/dev/null || stat -c %Y "$STATE_DIR/monitor-start")
+  if (( now - timestamp > days * 86400 )); then
+    alert_once drill-overdue "Vaultwarden: an isolated recovery drill is overdue."
+  else
+    clear_alert drill-overdue
+  fi
+  pending_mtimes=$(find "$STATE_DIR/pending" -type f -name 'vw-*.tar.gz.age' -printf '%T@\n' 2>/dev/null || true)
+  oldest=$now
+  for timestamp in $pending_mtimes; do
+    timestamp=${timestamp%.*}
+    count=$((count + 1))
+    if (( timestamp < oldest )); then oldest=$timestamp; fi
+  done
+  if (( count >= 7 || now - oldest > hours * 3600 )); then
+    alert_once pending-backlog "Vaultwarden: $count uploads pending, please check connectivity and backup logs."
+  else
+    clear_alert pending-backlog
+  fi
+  if [[ "$BACKUP_TARGET" == github || "${SECONDARY_TARGET:-none}" == github ]] && [[ -d "${REPO_DIR:-}/.git" ]] &&
+    declare -F vw_git_repo_kib >/dev/null && repo_kib=$(vw_git_repo_kib "$REPO_DIR"); then
+    if (( repo_kib >= 1024 * 1024 )); then
+      alert_once github-repo-size "Vaultwarden: the GitHub backup repository holds $((repo_kib / 1024)) MiB of Git objects. Deleting backups does not shrink Git history; see the manual section on GitHub capacity."
+    else
+      clear_alert github-repo-size
+    fi
+  fi
 }
 
 on_exit() {
@@ -236,6 +308,7 @@ on_exit() {
   elif [[ "${FINAL_STATUS:-failed}" == success ]]; then
     write_result success "uploaded and $UPLOAD_TARGET remote verified" || echo "ERROR: Could not write final run result."
   fi
+  check_backup_ages || echo "WARNING: backup age checks did not complete."
   echo "===== Backup finished with exit code $rc ====="
   exit "$rc"
 }
@@ -254,7 +327,11 @@ if ! vw_find_target "$CONTAINER" "$DATA_DIR" true; then FAILURE_REASON="cannot i
 CONTAINER="$VW_DETECTED_CONTAINER"; DATA_DIR="$VW_DETECTED_DATA_DIR"
 [[ "$CONTAINER" == "$OLD_CONTAINER" ]] || echo "INFO: 1Panel recreated container: $OLD_CONTAINER -> $CONTAINER"
 [[ "$DATA_DIR" == "$OLD_DATA_DIR" ]] || echo "INFO: data path updated: $OLD_DATA_DIR -> $DATA_DIR"
-if ! vw_save_config; then FAILURE_REASON="could not persist discovered container/data path"; exit 1; fi
+# Only rewrite the config when discovery changed it, so a scheduled run does
+# not overwrite settings saved from the menu while this run is in progress.
+if [[ "$CONTAINER" != "$OLD_CONTAINER" || "$DATA_DIR" != "$OLD_DATA_DIR" ]]; then
+  if ! vw_update_config_values "CONTAINER=$CONTAINER" "DATA_DIR=$DATA_DIR"; then FAILURE_REASON="could not persist discovered container/data path"; exit 1; fi
+fi
 
 echo "Container: $CONTAINER"
 echo "Image: $VW_DETECTED_IMAGE"
@@ -300,12 +377,14 @@ upload_snapshot() (
   manifest="${archive%.tar.gz.age}.manifest.json.age"
   python3 "$STORAGE_TOOL" verify-signature "$manifest" || return 1
   if [[ "$target" == webdav ]]; then
-    python3 "$STORAGE_TOOL" upload "$archive"
-    return $?
+    # Normalize: exit code 3 is reserved for "never retry" below.
+    python3 "$STORAGE_TOOL" upload "$archive" || return 1
+    return 0
   fi
   [[ -d "$REPO_DIR/.git" && -n "${GITHUB_REPO:-}" && -n "${GITHUB_BRANCH:-}" && -f "${GITHUB_SSH_KEY:-}" ]] || { echo "GitHub target configuration is incomplete."; return 1; }
   name=$(basename -- "$archive") || return 1
-  (( $(stat -c '%s' "$archive") <= MAX_FILE_MIB * 1024 * 1024 )) || { echo "Backup exceeds GitHub file size limit."; return 1; }
+  # Exit code 3: permanent, non-retryable failure (the file can never fit).
+  (( $(stat -c '%s' "$archive") <= MAX_FILE_MIB * 1024 * 1024 )) || { echo "Backup exceeds the GitHub single-file limit (MAX_FILE_MIB=$MAX_FILE_MIB)."; return 3; }
   vw_require_free_space "$REPO_DIR" "$MIN_FREE_BYTES" "Git 仓库目录" || return 1
   existing_url=$(git -C "$REPO_DIR" remote get-url origin) || return 1
   [[ "$existing_url" == "$GITHUB_REPO" ]] || { echo "GitHub worktree origin does not match the backup configuration."; return 1; }
@@ -362,58 +441,33 @@ upload_snapshot() (
 )
 
 try_pending_upload() {
-  local target="$1" marker="$2"
-  if upload_snapshot "$target" "$BACKUP_DIR/${marker##*/}"; then
+  local target="$1" marker="$2" rc=0
+  upload_snapshot "$target" "$BACKUP_DIR/${marker##*/}" || rc=$?
+  if (( rc == 0 )); then
     touch "$STATE_DIR/verified-$target" && rm -- "$marker"
-  else
-    echo "Upload to $target failed, pending: ${marker##*/}"
-    return 1
+    return
   fi
+  if (( rc == 3 )); then
+    # Never retry a file that can not fit; keep a record instead of a pending
+    # marker so the queue does not grow forever. Local ciphertext is retained.
+    mkdir -p "$STATE_DIR/rejected/$target"
+    mv -- "$marker" "$STATE_DIR/rejected/$target/${marker##*/}"
+    echo "ERROR: ${marker##*/} exceeds the $target single-file limit and was removed from the retry queue. Switch the primary target to WebDAV."
+    return 3
+  fi
+  echo "Upload to $target failed, pending: ${marker##*/}"
+  return 1
 }
 
 mkdir -p "$STATE_DIR/pending/github" "$STATE_DIR/pending/webdav"
 for queued_target in github webdav; do
   for pending_marker in "$STATE_DIR/pending/$queued_target"/vw-*.tar.gz.age; do
     [[ -f "$pending_marker" && ! -L "$pending_marker" ]] || continue
-    try_pending_upload "$queued_target" "$pending_marker" || break
+    queue_rc=0
+    try_pending_upload "$queued_target" "$pending_marker" || queue_rc=$?
+    (( queue_rc == 0 || queue_rc == 3 )) || break
   done
 done
-
-check_backup_ages() {
-  [[ "${VW_EXECUTION_MODE:-}" == systemd ]] || return 0
-  local hours="${ALERT_MAX_BACKUP_AGE_HOURS:-}" days="${ALERT_MAX_DRILL_AGE_DAYS:-90}" now timestamp pending_count oldest count=0
-  case "$BACKUP_FREQUENCY" in
-    weekly) hours="${hours:-192}" ;;
-    monthly) hours="${hours:-768}" ;;
-    *) hours="${hours:-36}" ;;
-  esac
-  [[ "$hours" =~ ^[1-9][0-9]{0,4}$ && "$days" =~ ^[1-9][0-9]{0,3}$ ]] || return 0
-  now=$(date +%s)
-  if [[ -f "$STATE_DIR/verified-$BACKUP_TARGET" ]]; then
-    timestamp=$(stat -c %Y "$STATE_DIR/verified-$BACKUP_TARGET")
-    if (( now - timestamp > hours * 3600 )); then
-      vw_notify failure "Vaultwarden: $BACKUP_TARGET backup verification is overdue." || true
-    fi
-  else
-    vw_notify failure "Vaultwarden: no successful $BACKUP_TARGET verification has been recorded since upgrading." || true
-  fi
-  touch -a "$STATE_DIR/monitor-start"
-  timestamp=$(stat -c %Y "$STATE_DIR/drill-verified" 2>/dev/null || stat -c %Y "$STATE_DIR/monitor-start")
-  if (( now - timestamp > days * 86400 )); then
-    vw_notify failure "Vaultwarden: an isolated recovery drill is overdue." || true
-  fi
-  pending_count=$(find "$STATE_DIR/pending" -type f -name 'vw-*.tar.gz.age' -printf '%T@\n')
-  oldest=$now
-  for timestamp in $pending_count; do
-    timestamp=${timestamp%.*}
-    count=$((count + 1))
-    if (( timestamp < oldest )); then oldest=$timestamp; fi
-  done
-  if (( count >= 7 || now - oldest > hours * 3600 )); then
-    vw_notify failure "Vaultwarden: $count uploads pending, please check connectivity and backup logs." || true
-  fi
-}
-check_backup_ages
 
 vw_perf_stage_end success
 vw_perf_stage_begin "manifest_generation"
@@ -427,10 +481,15 @@ vw_perf_stage_end success
 SNAPSHOT_SOURCE="$DATA_DIR"
 if [[ "$SNAPSHOT_MODE" == online ]]; then
   echo "Creating an online SQLite snapshot while Vaultwarden is running..."
+  echo "NOTE: online mode keeps db.sqlite3 consistent; attachments/sends are copied best-effort while the service runs."
   SNAPSHOT_SOURCE="$TMP_ROOT/online"
-  vw_require_free_space "$TMP_ROOT" "$BACKUP_REQUIRED_BYTES" "在线备份暂存目录" || exit 1
+  vw_require_free_space "$TMP_ROOT" "$BACKUP_REQUIRED_BYTES" "在线备份暂存目录" || { FAILURE_REASON="insufficient free space for the online snapshot staging directory"; exit 1; }
   mkdir "$SNAPSHOT_SOURCE"
-  sqlite3 -readonly "$DATA_DIR/db.sqlite3" ".timeout 10000" ".backup '$SNAPSHOT_SOURCE/db.sqlite3'"
+  if ! sqlite3 -readonly "$DATA_DIR/db.sqlite3" ".timeout 10000" ".backup '$SNAPSHOT_SOURCE/db.sqlite3'"; then
+    FAILURE_REASON="online SQLite .backup snapshot failed (database busy for more than 10s or unreadable)"
+    echo "ERROR: $FAILURE_REASON"
+    exit 1
+  fi
   chmod --reference="$DATA_DIR/db.sqlite3" "$SNAPSHOT_SOURCE/db.sqlite3"
   if (( EUID == 0 )); then chown --reference="$DATA_DIR/db.sqlite3" "$SNAPSHOT_SOURCE/db.sqlite3"; fi
 else
@@ -450,7 +509,7 @@ if command -v sqlite3 >/dev/null 2>&1; then
   SQLITE_RESULT=$(sqlite3 -readonly "$SNAPSHOT_SOURCE/db.sqlite3" 'PRAGMA quick_check;' 2>&1) || { FAILURE_REASON="SQLite quick_check command failed: $SQLITE_RESULT"; echo "ERROR: $FAILURE_REASON"; exit 1; }
   [[ "$SQLITE_RESULT" == "ok" ]] || { FAILURE_REASON="SQLite quick_check failed: $SQLITE_RESULT"; echo "ERROR: $FAILURE_REASON"; exit 1; }
   echo "SQLite quick_check: OK"
-  vw_perf_stage_end success "$(stat -c '%s' "$DATA_DIR/db.sqlite3")"
+  vw_perf_stage_end success "$(stat -c '%s' "$SNAPSHOT_SOURCE/db.sqlite3")"
 else
   echo "WARNING: sqlite3 command missing; DB quick_check skipped."
   vw_perf_stage_end skipped
@@ -459,11 +518,41 @@ fi
 vw_perf_stage_begin "snapshot_tar_age"
 echo "Creating encrypted complete /data snapshot..."
 OUTPUT_CREATED=true
-if [[ "$SNAPSHOT_MODE" == online ]]; then
-  tar --numeric-owner --exclude='./db.sqlite3' --exclude='./db.sqlite3-*' -czpf - -C "$DATA_DIR" . -C "$SNAPSHOT_SOURCE" db.sqlite3 | age -r "$AGE_RECIPIENT" -o "$OUTPUT"
-else
-  tar --numeric-owner -czpf - -C "$DATA_DIR" . | age -r "$AGE_RECIPIENT" -o "$OUTPUT"
-fi
+create_encrypted_snapshot() {
+  local -a pipe_status
+  set +e
+  if [[ "$SNAPSHOT_MODE" == online ]]; then
+    tar --numeric-owner --exclude='./db.sqlite3' --exclude='./db.sqlite3-*' -czpf - -C "$DATA_DIR" . -C "$SNAPSHOT_SOURCE" db.sqlite3 | age -r "$AGE_RECIPIENT" -o "$OUTPUT"
+    pipe_status=("${PIPESTATUS[@]}")
+  else
+    tar --numeric-owner -czpf - -C "$DATA_DIR" . | age -r "$AGE_RECIPIENT" -o "$OUTPUT"
+    pipe_status=("${PIPESTATUS[@]}")
+  fi
+  set -e
+  SNAPSHOT_TAR_RC="${pipe_status[0]:-1}"
+  SNAPSHOT_AGE_RC="${pipe_status[1]:-1}"
+  [[ "$SNAPSHOT_TAR_RC" == 0 && "$SNAPSHOT_AGE_RC" == 0 ]]
+}
+snapshot_attempt=1
+while ! create_encrypted_snapshot; do
+  rm -f -- "$OUTPUT"
+  # GNU tar exits 1 when a file changed while it was read. That can only
+  # happen in online mode; retry once, then fail with an actionable reason.
+  if [[ "$SNAPSHOT_MODE" == online && "$SNAPSHOT_TAR_RC" == 1 && "$SNAPSHOT_AGE_RC" == 0 ]]; then
+    if (( snapshot_attempt < 2 )); then
+      echo "WARNING: files under /data changed while the online snapshot was read (tar exit 1); retrying once."
+      snapshot_attempt=$((snapshot_attempt + 1))
+      continue
+    fi
+    FAILURE_REASON="online snapshot failed twice because files under /data changed during tar (exit 1); online mode only guarantees the database, set SNAPSHOT_MODE=stop in menu [21] for a consistent snapshot"
+  elif [[ "$SNAPSHOT_TAR_RC" != 0 ]]; then
+    FAILURE_REASON="tar failed while creating the /data snapshot (exit $SNAPSHOT_TAR_RC)"
+  else
+    FAILURE_REASON="age encryption of the /data snapshot failed (exit $SNAPSHOT_AGE_RC)"
+  fi
+  echo "ERROR: $FAILURE_REASON"
+  exit 1
+done
 [[ -s "$OUTPUT" ]] || { FAILURE_REASON="encrypted archive is empty"; exit 1; }
 SNAPSHOT_CREATED=true
 SIZE_BYTES=$(stat -c '%s' "$OUTPUT")
@@ -555,7 +644,9 @@ for target in "${targets[@]}"; do
   else
     vw_perf_stage_begin "webdav_upload_readback_verify"
   fi
-  if try_pending_upload "$target" "$STATE_DIR/pending/$target/$FILENAME"; then
+  upload_rc=0
+  try_pending_upload "$target" "$STATE_DIR/pending/$target/$FILENAME" || upload_rc=$?
+  if (( upload_rc == 0 )); then
     if [[ "$target" == github ]]; then
       REMOTE_VERIFIED_GITHUB=true
     else
@@ -565,13 +656,21 @@ for target in "${targets[@]}"; do
     vw_perf_stage_end success "$SIZE_BYTES"
   else
     vw_perf_stage_end failed "$SIZE_BYTES"
-    if [[ "$target" != "$UPLOAD_TARGET" ]]; then
+    if [[ "$target" == "$UPLOAD_TARGET" ]]; then
+      (( upload_rc != 3 )) || PRIMARY_REJECTED=true
+    elif (( upload_rc == 3 )); then
+      vw_notify failure "Vaultwarden: secondary backup to $target exceeds its single-file limit and will not be retried ($FILENAME)." || true
+    else
       vw_notify failure "Vaultwarden: secondary backup to $target is pending ($FILENAME)." || true
     fi
   fi
 done
 if [[ "$REMOTE_VERIFIED" != true ]]; then
-  FAILURE_REASON="primary target $UPLOAD_TARGET was not verified; local ciphertext retained and queued"
+  if [[ "${PRIMARY_REJECTED:-false}" == true ]]; then
+    FAILURE_REASON="backup exceeds the $UPLOAD_TARGET single-file limit (MAX_FILE_MIB=$MAX_FILE_MIB); not queued for retry, local ciphertext retained, switch the backup target to WebDAV"
+  else
+    FAILURE_REASON="primary target $UPLOAD_TARGET was not verified; local ciphertext retained and queued"
+  fi
   exit 1
 fi
 if [[ "$UPLOAD_TARGET" == webdav ]]; then

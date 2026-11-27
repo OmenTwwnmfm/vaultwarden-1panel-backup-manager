@@ -43,3 +43,18 @@ release_version_allowed 1.4.8 1.5.0
 if release_version_allowed 1.5.0 1.4.10; then exit 1; fi
 if release_version_allowed 1.5.0 1.6.0-dev; then exit 1; fi
 echo 'PASS: updater follows main with confirmation, ignores legacy channel settings, and rejects downgrades'
+
+# The manager VERSION is the single source; every published reference must match.
+version=$(sed -n 's/^VERSION="\([0-9][0-9.]*\)"$/\1/p' "$ROOT/scripts/vw-manager.sh")
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "FAIL: cannot read VERSION from vw-manager.sh" >&2; exit 1; }
+check_version_ref() {
+  grep -Fq -- "$2" "$ROOT/$1" || { echo "FAIL: $1 does not reference version $version (expected: $2)" >&2; exit 1; }
+}
+check_version_ref README.md "badge/version-$version-blue"
+check_version_ref scripts/README-先阅读.txt "v$version"
+check_version_ref docs/完整使用手册.md "**版本 $version**"
+check_version_ref docs/完整使用手册.md "**文档版本 $version**"
+check_version_ref docs/快速开始.md "**适用版本：$version**"
+latest=$(sed -n 's/^## v\([0-9][0-9.]*\) .*/\1/p' "$ROOT/CHANGELOG.md" | head -n 1)
+[[ "$latest" == "$version" ]] || { echo "FAIL: latest CHANGELOG entry v$latest does not match VERSION $version" >&2; exit 1; }
+echo "PASS: README, docs and CHANGELOG match VERSION $version"

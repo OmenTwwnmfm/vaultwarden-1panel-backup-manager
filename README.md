@@ -10,7 +10,7 @@
 ![Panel](https://img.shields.io/badge/panel-1Panel-1677ff)
 ![Encryption](https://img.shields.io/badge/encryption-age-16a34a)
 ![Scheduler](https://img.shields.io/badge/scheduler-systemd-6d28d9)
-![Version](https://img.shields.io/badge/version-1.5.2-blue)
+![Version](https://img.shields.io/badge/version-1.5.3-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Tests](https://github.com/OmenTwwnmfm/vaultwarden-1panel-backup-manager/actions/workflows/ci.yml/badge.svg)
 
@@ -291,6 +291,8 @@ tail -n 100 /var/log/vaultwarden-backup.log
 - SMTP 密码、Admin Token、Webhook Token 等秘密值不会进入部署清单；必须从你自己的密码管理或安全记录中恢复。
 
 ## 历史备份管理与 GitHub 容量
+
+GitHub 历史只增不减，删除备份不会缩小仓库。`[03]` 和 `vbm status` 显示仓库体积，超过 1 GiB 时定时任务告警；处理方法见手册「[GitHub 仓库容量](docs/完整使用手册.md#github-仓库容量)」。附件较多、密文接近单文件上限的实例建议以 WebDAV 为主目标。
 
 在菜单 `[10]` 选择 GitHub，可以查看当前分支的加密备份并删除选定的备份组。**删除当前分支文件后，Git 历史仍会保留旧对象**，因此仓库容量仍可能增长。
 

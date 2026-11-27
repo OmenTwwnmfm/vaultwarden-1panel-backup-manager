@@ -5,6 +5,8 @@ TMP="$(mktemp -d)"
 trap 'rm -rf -- "$TMP"' EXIT
 mkdir -p "$TMP/bin" "$TMP/data"
 export PYTHONUTF8=1 VW_TEST_ROOT="$TMP"
+VW_TEST_REAL_MKTEMP="$(command -v mktemp)"
+export VW_TEST_REAL_MKTEMP
 printf 'test database\n' > "$TMP/data/db.sqlite3"
 cat > "$TMP/common.sh" <<'COMMON'
 vw_atomic_replace() { mv -- "$1" "$2"; }
@@ -79,9 +81,9 @@ PYTHON
 cat > "$TMP/bin/mktemp" <<'MKTEMP'
 #!/usr/bin/env bash
 if [[ "${2:-}" == /var/tmp/vw-backup.* ]]; then
-  exec /usr/bin/mktemp -d "$VW_TEST_ROOT/work.XXXXXX"
+  exec "$VW_TEST_REAL_MKTEMP" -d "$VW_TEST_ROOT/work.XXXXXX"
 fi
-exec /usr/bin/mktemp "$@"
+exec "$VW_TEST_REAL_MKTEMP" "$@"
 MKTEMP
 chmod +x "$TMP/bin/"*
 PATH="$TMP/bin:$PATH"

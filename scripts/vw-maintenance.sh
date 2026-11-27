@@ -55,10 +55,43 @@ show_operational_status() {
   else
     echo "待上传任务：0"
   fi
+  if [[ -d "$state_dir/rejected" ]]; then
+    key=$(find "$state_dir/rejected" -type f -name 'vw-*.tar.gz.age' -printf '.' | wc -c)
+    if (( key > 0 )); then printf '超出单文件上限、不再重试的备份：%s（请改用 WebDAV 主目标）\n' "$key"; fi
+  fi
+  if [[ "${BACKUP_TARGET:-}" == github || "${SECONDARY_TARGET:-none}" == github ]]; then
+    show_github_capacity
+  fi
   if python3 "$STORAGE_TOOL" check-signing >/dev/null 2>&1; then
     echo "备份签名：已配置"
   else
     echo "备份签名：待配置"
+  fi
+}
+
+# GitHub keeps every committed blob in history, so the repository only grows.
+# Report the object store size and warn before the latest backup outgrows the
+# single-file limit.
+show_github_capacity() {
+  local repo="${REPO_DIR:-/opt/vw-github-repo}" kib last_bytes="" limit_bytes result_file
+  result_file="${BACKUP_RESULT_FILE:-/var/lib/vaultwarden-backup/last-result.env}"
+  if kib=$(vw_git_repo_kib "$repo" 2>/dev/null); then
+    printf 'GitHub 备份仓库 Git 对象体积：%s MiB（%s）\n' "$((kib / 1024))" "$repo"
+    if (( kib >= 1024 * 1024 )); then
+      echo "[注意] 仓库已超过 1 GiB。删除备份不会缩小 Git 历史，请参考手册「GitHub 仓库容量」处理。"
+    fi
+  else
+    echo "GitHub 备份仓库 Git 对象体积：无法读取（本地工作目录不存在：$repo）"
+  fi
+  if [[ -f "$result_file" && ! -L "$result_file" ]]; then
+    last_bytes=$(sed -n 's/^BACKUP_BYTES=\([0-9][0-9]*\)$/\1/p' "$result_file" | head -n 1)
+  fi
+  limit_bytes=$(( ${MAX_FILE_MIB:-90} * 1024 * 1024 ))
+  if [[ "$last_bytes" =~ ^[0-9]+$ ]] && (( last_bytes > 0 )); then
+    printf '最近一次密文大小：%s MiB / 单文件上限 %s MiB\n' "$((last_bytes / 1048576))" "${MAX_FILE_MIB:-90}"
+    if (( last_bytes * 100 >= limit_bytes * 80 )); then
+      echo "[注意] 最近一次备份已达到 GitHub 单文件上限的 80%，超限后将无法上传到 GitHub，建议把主目标切换为 WebDAV。"
+    fi
   fi
 }
 

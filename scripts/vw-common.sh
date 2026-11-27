@@ -132,7 +132,11 @@ vw_find_target() {
   export VW_DETECTED_CONTAINER VW_DETECTED_IMAGE VW_DETECTED_STATUS VW_DETECTED_DATA_DIR VW_DETECTED_HEALTH
 }
 
-vw_save_config() {
+VW_CONFIG_KEYS=(CONTAINER DATA_DIR AGE_RECIPIENT GITHUB_REPO GITHUB_BRANCH GITHUB_SSH_KEY BACKUP_DIR REPO_DIR RETENTION_DAYS MAX_FILE_MIB AGE_IDENTITY_DEFAULT SYSTEMD_TIME BACKUP_FREQUENCY MIN_FREE_MB GIT_PUSH_RETRIES GIT_RETRY_DELAY NOTIFY_METHOD TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID NTFY_URL NTFY_TOKEN WEBHOOK_URL NOTIFY_ON_SUCCESS NOTIFY_ON_FAILURE BACKUP_TARGET PRIMARY_TARGET SECONDARY_TARGET SNAPSHOT_MODE WEBDAV_RETENTION_DAYS WEBDAV_MIN_KEEP ALERT_MAX_BACKUP_AGE_HOURS ALERT_MAX_DRILL_AGE_DAYS CONTAINER_MATCH)
+
+# Write every known setting from the current shell variables. Callers must
+# hold the config lock; use vw_save_config or vw_update_config_values.
+vw_write_config_file() {
   local tmp var directory directory_owner directory_mode rc
   [[ -n "${CONFIG_FILE:-}" ]] || return 1
   directory=$(dirname -- "$CONFIG_FILE")
@@ -142,7 +146,7 @@ vw_save_config() {
   [[ ! -L "$CONFIG_FILE" ]] || return 1
   tmp=$(mktemp "${CONFIG_FILE}.XXXXXX") || return 1
   {
-    for var in CONTAINER DATA_DIR AGE_RECIPIENT GITHUB_REPO GITHUB_BRANCH GITHUB_SSH_KEY BACKUP_DIR REPO_DIR RETENTION_DAYS MAX_FILE_MIB AGE_IDENTITY_DEFAULT SYSTEMD_TIME BACKUP_FREQUENCY MIN_FREE_MB GIT_PUSH_RETRIES GIT_RETRY_DELAY NOTIFY_METHOD TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID NTFY_URL NTFY_TOKEN WEBHOOK_URL NOTIFY_ON_SUCCESS NOTIFY_ON_FAILURE BACKUP_TARGET PRIMARY_TARGET SECONDARY_TARGET SNAPSHOT_MODE WEBDAV_RETENTION_DAYS WEBDAV_MIN_KEEP ALERT_MAX_BACKUP_AGE_HOURS ALERT_MAX_DRILL_AGE_DAYS CONTAINER_MATCH; do
+    for var in "${VW_CONFIG_KEYS[@]}"; do
       printf '%s=%q\n' "$var" "${!var-}"
     done
   } > "$tmp"
@@ -151,6 +155,66 @@ vw_save_config() {
   vw_atomic_replace "$tmp" "$CONFIG_FILE" || { rc=$?; rm -f -- "$tmp"; return "$rc"; }
   rm -f -- "$tmp"
   return 0
+}
+
+vw_config_lock_path() {
+  local lock="${VW_CONFIG_LOCK_FILE:-/run/lock/vaultwarden-backup-config.lock}"
+  [[ ! -L "$lock" ]] || { vw_error "拒绝使用符号链接配置锁：$lock"; return 1; }
+  mkdir -p -- "$(dirname -- "$lock")" || return 1
+  printf '%s' "$lock"
+}
+
+# Serialize writers so the menu and the backup worker never interleave
+# config replacements.
+vw_save_config() {
+  local lock
+  lock=$(vw_config_lock_path) || return 1
+  (
+    flock -w 30 9 || { vw_error "等待配置文件写锁超时：$lock"; exit 1; }
+    vw_write_config_file
+  ) 9>"$lock"
+}
+
+# Re-read the current config under the lock and change only the given
+# NAME=VALUE pairs, so settings saved meanwhile by another writer survive.
+vw_update_config_values() {
+  local assignment lock name known
+  for assignment in "$@"; do
+    name="${assignment%%=*}"
+    [[ "$assignment" == *=* ]] || { vw_error "无效的配置项：$assignment"; return 1; }
+    known=false
+    for lock in "${VW_CONFIG_KEYS[@]}"; do [[ "$lock" != "$name" ]] || known=true; done
+    [[ "$known" == true ]] || { vw_error "未知的配置项：$name"; return 1; }
+  done
+  lock=$(vw_config_lock_path) || return 1
+  (
+    flock -w 30 9 || { vw_error "等待配置文件写锁超时：$lock"; exit 1; }
+    vw_require_secure_config "$CONFIG_FILE" || exit 1
+    unset "${VW_CONFIG_KEYS[@]}"
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE" || exit 1
+    for assignment in "$@"; do
+      printf -v "${assignment%%=*}" '%s' "${assignment#*=}"
+    done
+    vw_write_config_file
+  ) 9>"$lock"
+}
+
+# Size of a Git repository's object store in KiB (loose + packed objects).
+# Deleting files from the branch does not reduce it; history keeps them.
+vw_git_repo_kib() {
+  local repo="$1" counts
+  [[ -d "$repo/.git" ]] || return 1
+  counts=$(git -C "$repo" count-objects -v 2>/dev/null) || return 1
+  awk '$1 == "size:" || $1 == "size-pack:" { total += $2 } END { print total + 0 }' <<<"$counts"
+}
+
+# Notification endpoints must use HTTPS; plain HTTP is only accepted for a
+# relay on this host, matching the WebDAV rule.
+vw_notify_url_allowed() {
+  local url="$1"
+  [[ "$url" =~ ^https://[^[:space:]/]+ ]] && return 0
+  [[ "$url" =~ ^http://(localhost|127\.0\.0\.1|\[::1\])(:[0-9]{1,5})?(/[^[:space:]]*)?$ ]]
 }
 
 vw_find_container_by_data_dir() {
@@ -389,13 +453,22 @@ env = {}
 for line in p.stdout.splitlines():
     if "=" in line:
         k, v = line.split("=", 1); env[k] = v
-method = env.get("NOTIFY_METHOD", "none").lower()
+# The child shell prints unset settings as empty strings; treat those as the
+# documented defaults so a config without NOTIFY_ON_* still sends alerts.
+method = (env.get("NOTIFY_METHOD") or "none").lower()
 if method in ("", "none", "off"):
     sys.exit(0)
-if force.lower() not in ("1", "true", "yes") and event == "success" and env.get("NOTIFY_ON_SUCCESS", "true").lower() not in ("1", "true", "yes"):
+if force.lower() not in ("1", "true", "yes") and event == "success" and (env.get("NOTIFY_ON_SUCCESS") or "true").lower() not in ("1", "true", "yes"):
     sys.exit(0)
-if force.lower() not in ("1", "true", "yes") and event != "success" and env.get("NOTIFY_ON_FAILURE", "true").lower() not in ("1", "true", "yes"):
+if force.lower() not in ("1", "true", "yes") and event != "success" and (env.get("NOTIFY_ON_FAILURE") or "true").lower() not in ("1", "true", "yes"):
     sys.exit(0)
+def require_https(url):
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme == "https" and parsed.hostname:
+        return
+    if parsed.scheme == "http" and parsed.hostname in ("localhost", "127.0.0.1", "::1"):
+        return
+    raise RuntimeError("notification URL must use https:// (http:// only for localhost)")
 try:
     if method == "telegram":
         token, chat = env.get("TELEGRAM_BOT_TOKEN", ""), env.get("TELEGRAM_CHAT_ID", "")
@@ -406,12 +479,14 @@ try:
     elif method == "ntfy":
         url, token = env.get("NTFY_URL", ""), env.get("NTFY_TOKEN", "")
         if not url: raise RuntimeError("ntfy URL not configured")
+        require_https(url)
         headers = {"Title": "Vaultwarden Backup", "Priority": "high" if event != "success" else "default"}
         if token: headers["Authorization"] = "Bearer " + token
         req = urllib.request.Request(url, data=message.encode(), headers=headers, method="POST")
     elif method == "webhook":
         url = env.get("WEBHOOK_URL", "")
         if not url: raise RuntimeError("Webhook URL not configured")
+        require_https(url)
         data = json.dumps({"project":"Vaultwarden Backup Manager", "event":event, "message":message}, ensure_ascii=False).encode()
         req = urllib.request.Request(url, data=data, headers={"Content-Type":"application/json"}, method="POST")
     else:
@@ -419,7 +494,8 @@ try:
     with urllib.request.urlopen(req, timeout=15) as response:
         if response.status < 200 or response.status >= 300: raise RuntimeError("HTTP status " + str(response.status))
 except Exception as exc:
-    print("[WARN] Notification failed (backup status unchanged):", type(exc).__name__, file=sys.stderr)
+    detail = str(exc) if isinstance(exc, RuntimeError) else ""
+    print("[WARN] Notification failed (backup status unchanged):", type(exc).__name__, detail, file=sys.stderr)
     sys.exit(1)
 PY
 }

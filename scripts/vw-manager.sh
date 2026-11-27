@@ -5,7 +5,7 @@ set -Eeuo pipefail
 umask 077
 unset VW_CONFIG_FILE VW_LOG_FILE VW_LOCK_FILE VW_STATE_DIR VW_COMMON_LIB VW_MANIFEST_TOOL VW_ARCHIVE_CHECK_TOOL VW_MIN_FREE_MB VW_PERF_FILE VW_PERF_LOCK_FILE VW_DIAG_REPORT_DIR
 
-VERSION="1.5.2"
+VERSION="1.5.3"
 CONFIG_FILE="/etc/vaultwarden-backup.conf"
 BACKUP_SCRIPT="/usr/local/sbin/vw-backup.sh"
 RESTORE_SCRIPT="/usr/local/sbin/vw-restore-prepare.sh"
@@ -363,11 +363,16 @@ write_config() {
       printf '%s=%q\n' "$setting" "${!setting-}"
     done
   } > "$tmp"
-  local target_tmp
-  target_tmp=$(mktemp "${CONFIG_FILE}.XXXXXX") || { rm -f -- "$tmp"; return 1; }
-  install -o root -g root -m 600 "$tmp" "$target_tmp" || { rm -f -- "$tmp" "$target_tmp"; return 1; }
-  vw_atomic_replace "$target_tmp" "$CONFIG_FILE" || { rm -f -- "$tmp" "$target_tmp"; return 1; }
-  rm -f "$tmp"
+  local lock rc=0
+  lock=$(vw_config_lock_path) || { rm -f -- "$tmp"; return 1; }
+  (
+    flock -w 30 9 || { err "等待配置文件写锁超时：$lock"; exit 1; }
+    target_tmp=$(mktemp "${CONFIG_FILE}.XXXXXX") || exit 1
+    install -o root -g root -m 600 "$tmp" "$target_tmp" || { rm -f -- "$target_tmp"; exit 1; }
+    vw_atomic_replace "$target_tmp" "$CONFIG_FILE" || { rm -f -- "$target_tmp"; exit 1; }
+  ) 9>"$lock" || rc=$?
+  rm -f -- "$tmp"
+  return "$rc"
 }
 
 install_helper_scripts() {
@@ -659,6 +664,13 @@ check_configuration() {
   printf '整个 /data 大小：%s\n' "$(du -sh "$DATA_DIR" | awk '{print $1}')"
   printf '数据目录剩余磁盘：%s\n' "$(df -h "$DATA_DIR" | awk 'NR==2 {print $4}')"
   ok "本地数据路径及容器检查通过。"
+  if [[ "$BACKUP_TARGET" == github || "${SECONDARY_TARGET:-none}" == github ]]; then
+    echo "========== GitHub 容量 =========="
+    show_github_capacity
+  fi
+  if [[ "${SNAPSHOT_MODE:-stop}" == online ]]; then
+    warn "当前为 online 快照模式：只保证数据库一致，附件/Send 为尽力而为；生产环境推荐 stop 模式（菜单 [21]）。"
+  fi
   if [[ "$BACKUP_TARGET" == webdav ]]; then
     python3 "$STORAGE_TOOL" list > /dev/null || return 1
     ok "WebDAV 目录读取连接正常。"
@@ -1369,6 +1381,14 @@ restore_rehearsal() (
   staging="$staging_root/staging"
   accept_backup_signature "$archive" || return 1
   VW_ALLOW_UNSIGNED="$ALLOW_UNSIGNED" VW_MIN_FREE_MB="${MIN_FREE_MB:-512}" VW_STORAGE_TOOL="$STORAGE_TOOL" bash "$RESTORE_SCRIPT" "$archive" "$identity" "$staging" || { err "备份解密或 SQLite 检查失败。"; return 1; }
+  local deep_check integrity_result
+  deep_check=$(read_default "是否额外执行 SQLite PRAGMA integrity_check（比 quick_check 更彻底，耗时更长）yes/no" "no")
+  if [[ "${deep_check,,}" == yes ]]; then
+    info "正在执行 PRAGMA integrity_check..."
+    integrity_result=$(sqlite3 -readonly "$staging/data/db.sqlite3" 'PRAGMA integrity_check;' 2>&1) || { err "SQLite integrity_check 执行失败：$integrity_result"; return 1; }
+    [[ "$integrity_result" == ok ]] || { err "SQLite integrity_check 未通过：$integrity_result"; return 1; }
+    ok "SQLite integrity_check：OK"
+  fi
   test_name="vw-restore-drill-$(date +%Y%m%d%H%M%S)-$$"
   echo
   echo "========== 隔离恢复演练计划 =========="
@@ -1432,7 +1452,7 @@ install_systemd_timer() {
   BACKUP_FREQUENCY="$frequency"
   BACKUP_TARGET="$target"
   PRIMARY_TARGET="$target"
-  vw_save_config || { err "保存配置失败。"; return 1; }
+  vw_update_config_values "SYSTEMD_TIME=$SYSTEMD_TIME" "BACKUP_FREQUENCY=$BACKUP_FREQUENCY" "BACKUP_TARGET=$BACKUP_TARGET" "PRIMARY_TARGET=$PRIMARY_TARGET" || { err "保存配置失败。"; return 1; }
   cat > /etc/systemd/system/vw-backup.service <<'UNIT'
 [Unit]
 Description=Scheduled Vaultwarden encrypted backup
@@ -1527,10 +1547,12 @@ configure_notifications() {
       ;;
     ntfy)
       NTFY_URL=$(read_default "ntfy 完整 Topic URL（例如 https://ntfy.sh/your-private-topic）" "${NTFY_URL:-}")
+      vw_notify_url_allowed "$NTFY_URL" || { err "ntfy 地址必须使用 https://（仅本机 localhost/127.0.0.1 允许 http://），避免 Token 和告警内容明文传输。"; return 1; }
       read -r -p "ntfy Access Token（没有则直接回车）: " -s NTFY_TOKEN; echo
       ;;
     webhook)
       read -r -p "Webhook URL（输入内容不会回显）: " -s WEBHOOK_URL; echo
+      vw_notify_url_allowed "$WEBHOOK_URL" || { err "Webhook 地址必须使用 https://（仅本机 localhost/127.0.0.1 允许 http://）。"; return 1; }
       ;;
     none)
       TELEGRAM_BOT_TOKEN=""; TELEGRAM_CHAT_ID=""; NTFY_URL=""; NTFY_TOKEN=""; WEBHOOK_URL=""
@@ -1538,7 +1560,9 @@ configure_notifications() {
   esac
   NOTIFY_ON_SUCCESS=$(read_default "是否发送备份成功通知 true/false" "${NOTIFY_ON_SUCCESS:-true}")
   NOTIFY_ON_FAILURE=$(read_default "是否发送备份失败通知 true/false" "${NOTIFY_ON_FAILURE:-true}")
-  vw_save_config || { err "保存通知配置失败。"; return 1; }
+  vw_update_config_values "NOTIFY_METHOD=$NOTIFY_METHOD" "TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}" "TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}" \
+    "NTFY_URL=${NTFY_URL:-}" "NTFY_TOKEN=${NTFY_TOKEN:-}" "WEBHOOK_URL=${WEBHOOK_URL:-}" \
+    "NOTIFY_ON_SUCCESS=$NOTIFY_ON_SUCCESS" "NOTIFY_ON_FAILURE=$NOTIFY_ON_FAILURE" || { err "保存通知配置失败。"; return 1; }
   ok "通知配置已保存到权限为 600 的配置文件。"
   if [[ "$NOTIFY_METHOD" != none ]]; then
     if vw_notify success "Vaultwarden Backup Manager notification test from $(hostname)." true; then
@@ -1594,6 +1618,9 @@ configure_backup_policy() {
   delay=$(read_default "每次重试基础等待秒数" "${GIT_RETRY_DELAY:-15}")
   secondary=$(read_default "次目标 github / webdav / none" "${SECONDARY_TARGET:-none}")
   snapshot=$(read_default "快照模式 stop / online" "${SNAPSHOT_MODE:-stop}")
+  if [[ "$snapshot" == online ]]; then
+    warn "online 模式不停机：数据库用 SQLite .backup 保证一致，附件、Send 等文件在服务运行中打包，只是尽力而为；运行中文件变化时会重试一次后失败。生产环境推荐 stop。"
+  fi
   remote_retention=$(read_default "WebDAV 远端保留天数（0 关闭）" "${WEBDAV_RETENTION_DAYS:-0}")
   remote_keep=$(read_default "WebDAV 至少保留最近几组" "${WEBDAV_MIN_KEEP:-7}")
   [[ "$retention" =~ ^[0-9]+$ ]] && ((retention >= 1 && retention <= 3650)) || { err "保留天数必须为 1-3650。"; return 1; }
@@ -1610,7 +1637,9 @@ configure_backup_policy() {
   SNAPSHOT_MODE="$snapshot"
   WEBDAV_RETENTION_DAYS="$remote_retention"
   WEBDAV_MIN_KEEP="$remote_keep"
-  vw_save_config || { err "保存配置失败。"; return 1; }
+  vw_update_config_values "RETENTION_DAYS=$RETENTION_DAYS" "MAX_FILE_MIB=$MAX_FILE_MIB" "MIN_FREE_MB=$MIN_FREE_MB" \
+    "GIT_PUSH_RETRIES=$GIT_PUSH_RETRIES" "GIT_RETRY_DELAY=$GIT_RETRY_DELAY" "SECONDARY_TARGET=$SECONDARY_TARGET" \
+    "SNAPSHOT_MODE=$SNAPSHOT_MODE" "WEBDAV_RETENTION_DAYS=$WEBDAV_RETENTION_DAYS" "WEBDAV_MIN_KEEP=$WEBDAV_MIN_KEEP" || { err "保存配置失败。"; return 1; }
   ok "备份策略已保存。"
   pause
 }
