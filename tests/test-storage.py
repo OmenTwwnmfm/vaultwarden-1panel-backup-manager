@@ -220,8 +220,8 @@ class StorageTests(unittest.TestCase):
                 check=True,
             )
             public_key = key.with_suffix(".pub").read_text(encoding="ascii")
-            (directory / "allowed_signers").write_text(
-                f"vbm-backup {public_key}", encoding="ascii", newline="\n"
+            (directory / "allowed_signers").write_bytes(
+                f"vbm-backup {public_key}".encode("ascii")
             )
         with patch.object(storage, "trusted_file", side_effect=lambda path, **kwargs: path.is_file()):
             with self.assertRaises(storage.MissingSignature):

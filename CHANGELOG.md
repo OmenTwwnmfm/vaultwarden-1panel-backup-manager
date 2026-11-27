@@ -1,5 +1,12 @@
 # 更新日志
 
+## v1.5.4 - 测试与 CI 兼容性修复
+
+- 测试：`tests/test-storage.py` 不再使用 Python 3.10 才支持的 `Path.write_text(newline=)`，改为直接写入字节，Python 3.9（Debian 11）下测试可以通过。
+- CI：Python 3.9/3.10 改在官方 `python:<版本>-slim` 容器中以非 root 用户运行；Debian 11 容器在官方源不可用时切换到 `archive.debian.org`。
+
+升级：功能与配置文件格式均未变化，无需运行 `[22]`。
+
 ## v1.5.3 - 稳定性加固
 
 - 修复：通知配置缺少 `NOTIFY_ON_SUCCESS` / `NOTIFY_ON_FAILURE` 行（例如旧版配置）时，失败通知被当作已关闭而静默跳过。现在缺省值按文档视为 `true`。

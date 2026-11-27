@@ -1,4 +1,4 @@
-Vaultwarden 1Panel Backup Manager v1.5.3
+Vaultwarden 1Panel Backup Manager v1.5.4
 =======================================
 
 适用环境
