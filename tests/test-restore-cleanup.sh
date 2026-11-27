@@ -54,8 +54,19 @@ mkdir "$TMP/existing"
 touch "$TMP/existing/preserve"
 if VW_TEST_FAIL=none bash "$ROOT/scripts/vw-restore-prepare.sh" "$TMP/$archive_name" "$TMP/identity" "$TMP/existing" > "$TMP/log" 2>&1; then exit 1; fi
 [[ -f "$TMP/existing/preserve" ]]
-if VW_TEST_FAIL=none VW_MIN_FREE_MB=99999999 VW_ALLOW_UNSIGNED=1 bash "$ROOT/scripts/vw-restore-prepare.sh" "$TMP/$archive_name" "$TMP/identity" "$TMP/disk-reserve" > "$TMP/log" 2>&1; then cat "$TMP/log"; exit 1; fi
-grep -q '空间不足' "$TMP/log" || { cat "$TMP/log"; exit 1; }
+fs_type() { stat -f -c '%T' -- "$1" 2>/dev/null || true; }
+DISK_TMP=""
+if [[ "$(fs_type "$TMP")" != tmpfs ]]; then
+  DISK_TMP="$TMP"
+elif [[ -d /var/tmp && "$(fs_type /var/tmp)" != tmpfs ]]; then
+  DISK_TMP="$(mktemp -d /var/tmp/vw-test-restore.XXXXXX)"
+fi
+if [[ -n "$DISK_TMP" ]]; then
+  if VW_TEST_FAIL=none VW_MIN_FREE_MB=99999999 VW_ALLOW_UNSIGNED=1 bash "$ROOT/scripts/vw-restore-prepare.sh" "$TMP/$archive_name" "$TMP/identity" "$DISK_TMP/disk-reserve" > "$TMP/log" 2>&1; then cat "$TMP/log"; exit 1; fi
+  grep -q '空间不足' "$TMP/log" || { cat "$TMP/log"; exit 1; }
+  [[ ! -e "$DISK_TMP/disk-reserve" ]] || { cat "$TMP/log"; exit 1; }
+  [[ "$DISK_TMP" == "$TMP" ]] || rmdir -- "$DISK_TMP"
+fi
 if [[ "$(uname -s)" == Linux && "$(stat -f -c '%T' /dev/shm 2>/dev/null || true)" == tmpfs ]]; then
   SHM_TMP="$(mktemp -d /dev/shm/vw-test-restore.XXXXXX)"
   trap 'rm -rf -- "$TMP" "$SHM_TMP"' EXIT
