@@ -97,7 +97,7 @@ show_github_capacity() {
 
 warn_if_helpers_stale() {
   [[ -r "$CONFIG_FILE" && -f "$SCRIPT_DIR/vw-backup.sh" && -f "$SCRIPT_DIR/../run.sh" ]] || return 0
-  local source installed mismatched=()
+  local source installed module mismatched=()
   check_helper() {
     source="$1"
     installed="$2"
@@ -115,6 +115,9 @@ warn_if_helpers_stale() {
   check_helper "$SCRIPT_DIR/vw-diagnose.sh" /usr/local/sbin/vw-diagnose.sh
   check_helper "$SCRIPT_DIR/vw-performance.py" /usr/local/libexec/vw-performance.py
   check_helper "$SCRIPT_DIR/vw-manager.sh" "$MANAGER_SCRIPT"
+  for module in ${MANAGER_MODULES[@]+"${MANAGER_MODULES[@]}"}; do
+    check_helper "$SCRIPT_DIR/$module" "/usr/local/libexec/$module"
+  done
   if ((${#mismatched[@]})); then
     warn "后台脚本与当前源码不同：${mismatched[*]}；请使用菜单 [22] 同步。"
   fi

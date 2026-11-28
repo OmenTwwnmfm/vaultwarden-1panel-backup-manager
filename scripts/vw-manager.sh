@@ -16,11 +16,25 @@ BACKUP_SIGNING_DIR="/etc/vaultwarden-backup-signing"
 BACKUP_LOCK_FILE="/run/lock/vaultwarden-backup.lock"
 BACKUP_RESULT_FILE="/var/lib/vaultwarden-backup/last-result.env"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# Every shared library and manager module passes the root trust check before it is sourced.
+vbm_source_trusted() {
+  local file="$1" owner mode
+  if [[ ! -f "$file" || -L "$file" ]]; then
+    printf '[错误] 拒绝加载不存在或为符号链接的脚本模块：%s\n' "$file" >&2
+    return 1
+  fi
+  read -r owner mode < <(stat -c '%u %a' -- "$file") || { printf '[错误] 无法读取脚本模块属性：%s\n' "$file" >&2; return 1; }
+  if [[ "$owner" != 0 ]] || (( (8#$mode & 022) != 0 )); then
+    printf '[错误] 脚本模块必须由 root 所有且不可被组/其他用户写入：%s\n' "$file" >&2
+    return 1
+  fi
+  # shellcheck disable=SC1090 # 模块路径在运行时确定
+  source "$file"
+}
 COMMON_LIB="$SCRIPT_DIR/vw-common.sh"
 if [[ ! -f "$COMMON_LIB" ]]; then COMMON_LIB="/usr/local/libexec/vw-common.sh"; fi
 if [[ -f "$COMMON_LIB" ]]; then
-  # shellcheck disable=SC1090
-  source "$COMMON_LIB"
+  vbm_source_trusted "$COMMON_LIB" || exit 1
 else
   printf '[错误] 找不到共享检测库：%s\n' "$COMMON_LIB" >&2
   exit 1
@@ -29,10 +43,17 @@ STORAGE_TOOL="$SCRIPT_DIR/vw-storage.py"
 [[ -f "$STORAGE_TOOL" ]] || STORAGE_TOOL="/usr/local/libexec/vw-storage.py"
 MAINTENANCE_LIB="$SCRIPT_DIR/vw-maintenance.sh"
 [[ -f "$MAINTENANCE_LIB" ]] || MAINTENANCE_LIB="/usr/local/libexec/vw-maintenance.sh"
-# shellcheck disable=SC1090 # 路径带回退逻辑，故意动态 source
-source "$MAINTENANCE_LIB"
+vbm_source_trusted "$MAINTENANCE_LIB" || exit 1
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
+
+# Manager modules live next to vw-common.sh: scripts/ in a checkout, /usr/local/libexec when installed.
+MANAGER_MODULES=()
+MANAGER_MODULE_DIR=$(dirname -- "$COMMON_LIB")
+for manager_module in "${MANAGER_MODULES[@]}"; do
+  vbm_source_trusted "$MANAGER_MODULE_DIR/$manager_module" || exit 1
+done
+unset manager_module
 
 info() { printf "${BLUE}[信息]${NC} %s\n" "$*"; }
 ok() { printf "${GREEN}[完成]${NC} %s\n" "$*"; }
@@ -376,9 +397,12 @@ write_config() {
 }
 
 install_helper_scripts() {
-  local source_dir="$SCRIPT_DIR"
+  local source_dir="$SCRIPT_DIR" module
   [[ -f "$source_dir/vw-maintenance.sh" ]] || { err "缺少 vw-maintenance.sh。"; return 1; }
   [[ -f "$source_dir/vw-storage.py" ]] || { err "缺少 vw-storage.py。"; return 1; }
+  for module in "${MANAGER_MODULES[@]}"; do
+    [[ -f "$source_dir/$module" ]] || { err "缺少管理器模块 $module。"; return 1; }
+  done
   [[ -f "$source_dir/vw-manager.sh" && -f "$source_dir/vw-common.sh" && -f "$source_dir/vw-backup.sh" && -f "$source_dir/vw-restore-prepare.sh" && -f "$source_dir/vw-archive-check.py" && -f "$source_dir/vw-manifest.py" && -f "$source_dir/vw-diagnose.sh" && -f "$source_dir/vw-performance.py" && -f "$source_dir/vbm-launcher.sh" ]] || {
     err "项目脚本不完整，缺少公共库、备份/恢复或归档检查工具。"
     return 1
@@ -386,6 +410,9 @@ install_helper_scripts() {
   install -d -o root -g root -m 755 /usr/local/libexec /usr/local/sbin
   install -o root -g root -m 644 "$source_dir/vw-common.sh" /usr/local/libexec/vw-common.sh || return 1
   install -o root -g root -m 644 "$source_dir/vw-maintenance.sh" /usr/local/libexec/vw-maintenance.sh || return 1
+  for module in "${MANAGER_MODULES[@]}"; do
+    install -o root -g root -m 644 "$source_dir/$module" "/usr/local/libexec/$module" || return 1
+  done
   install -o root -g root -m 700 "$source_dir/vw-backup.sh" "$BACKUP_SCRIPT" || return 1
   install -o root -g root -m 700 "$source_dir/vw-restore-prepare.sh" "$RESTORE_SCRIPT" || return 1
   install -o root -g root -m 755 "$source_dir/vw-archive-check.py" /usr/local/libexec/vw-archive-check.py || return 1
@@ -418,6 +445,7 @@ PYVBM
   install -o root -g root -m 644 "$(dirname "$source_dir")/logrotate-vaultwarden-backup" /etc/logrotate.d/vaultwarden-backup || return 1
   ok "后台脚本已安装/更新："
   echo "  /usr/local/libexec/vw-common.sh"
+  for module in "${MANAGER_MODULES[@]}"; do echo "  /usr/local/libexec/$module"; done
   echo "  /usr/local/libexec/vw-manifest.py"
   echo "  /usr/local/libexec/vw-archive-check.py"
   echo "  $BACKUP_SCRIPT"
