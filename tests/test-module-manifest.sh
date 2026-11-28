@@ -13,7 +13,7 @@ if [[ "$listed" != "$present" ]]; then
   diff <(printf '%s\n' "$listed") <(printf '%s\n' "$present") >&2 || true
   exit 1
 fi
-grep -Fq 'for module in "${MANAGER_MODULES[@]}"; do' <(sed -n '/^install_helper_scripts() {/,/^}/p' "$MANAGER") || {
+grep -Fq 'for module in "${MANAGER_MODULES[@]}"; do' <(sed -n '/^install_helper_scripts() {/,/^}/p' "$MANAGER" "$ROOT"/scripts/manager-*.sh) || {
   echo "FAIL: install_helper_scripts does not install MANAGER_MODULES" >&2; exit 1;
 }
 grep -Fq 'MANAGER_MODULES[@]' <(sed -n '/^warn_if_helpers_stale() {/,/^}/p' "$ROOT/scripts/vw-maintenance.sh") || {
