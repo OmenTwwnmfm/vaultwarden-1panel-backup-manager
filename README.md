@@ -10,7 +10,7 @@
 ![Deploy](https://img.shields.io/badge/deploy-1Panel%20%7C%20Compose%20%7C%20Docker-1677ff)
 ![Encryption](https://img.shields.io/badge/encryption-age-16a34a)
 ![Scheduler](https://img.shields.io/badge/scheduler-systemd-6d28d9)
-![Version](https://img.shields.io/badge/version-1.6.1-blue)
+![Version](https://img.shields.io/badge/version-1.6.3-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Tests](https://github.com/OmenTwwnmfm/vaultwarden-backup-manager/actions/workflows/ci.yml/badge.svg)
 
@@ -44,9 +44,9 @@ sudo bash ./run.sh
 
 ## 功能特点
 
-### v1.5.0 升级说明
+### 备份签名与多目标
 
-菜单 `[01]`–`[23]` 沿用 v1.4.8。升级后运行 `[22]` 同步后台脚本，在 `[03]` 初始化独立的备份签名密钥，并把 `/etc/vaultwarden-backup-signing/allowed_signers` 留存到离线介质。
+首次配置后在 `[03]` 初始化独立的备份签名密钥，并把 `/etc/vaultwarden-backup-signing/allowed_signers` 留存到离线介质。各版本的变更见 [CHANGELOG](CHANGELOG.md)。
 
 - 新备份和部署清单各带 `.sha256.sig`。恢复、解密验证和读取清单会验签。已知来源的无签名旧备份可以逐次输入 `UNSIGNED` 继续。
 - `[03]` 显示密钥和可信签名者名单的路径及文件状态。各文件的保存方式及三种恢复来源所需文件见[备份签名与迁移](docs/完整使用手册.md#备份签名与迁移)。
@@ -154,13 +154,24 @@ WebDAV 使用已有 age 公钥加密完整 `/data` 和部署清单。备份只�
 vaultwarden-backup-manager/
 ├── README.md
 ├── CHANGELOG.md
+├── ROADMAP.md
 ├── LICENSE
 ├── .gitignore
+├── .shellcheckrc
+├── .github/                          # CI 工作流与 Issue 模板
 ├── run.sh
 ├── logrotate-vaultwarden-backup
 ├── scripts/
-│   ├── vw-manager.sh                 # 交互式管理器
+│   ├── vw-manager.sh                 # 交互式管理器入口：加载模块、主菜单与命令分发
+│   ├── manager-ui.sh                # 终端提示、确认输入与运行环境检查
+│   ├── manager-config.sh            # 依赖检查、容器发现、配置向导与备份签名
+│   ├── manager-github.sh            # GitHub SSH 与备份仓库初始化
+│   ├── manager-backup.sh            # 手动备份、本地 / WebDAV / 历史备份管理
+│   ├── manager-restore.sh           # 恢复、验证、隔离演练与部署清单查看
+│   ├── manager-systemd.sh           # 后台脚本安装、systemd 定时器与备份策略
+│   ├── manager-ops.sh               # 通知、诊断、性能监控与日志
 │   ├── vw-common.sh                 # 容器发现、配置保存、通知等公共函数
+│   ├── vw-maintenance.sh            # 项目更新检查与 GitHub 仓库容量检查
 │   ├── vw-backup.sh                 # systemd / 手动调用的非交互备份工作器
 │   ├── vw-restore-prepare.sh        # 校验、解密、暂存及 SQLite 检查
 │   ├── vw-archive-check.py          # 解压前的 tar 路径/文件类型安全检查
@@ -169,10 +180,15 @@ vaultwarden-backup-manager/
 │   ├── vw-performance.py            # 性能历史汇总、明细与 CSV 导出
 │   ├── vw-storage.py                # 本地备份分组、删除保护和 WebDAV 传输
 │   ├── vbm-launcher.sh              # 全局 vbm 命令安装模板
-│   └── backup.conf.example          # 配置字段参考
+│   ├── backup.conf.example          # 配置字段参考
+│   ├── README-先阅读.txt
+│   └── 1Panel-Vaultwarden-信息记录模板.txt
+├── tests/                            # 回归测试（Bash / Python）
 └── docs/
     ├── 快速开始.md
     ├── 完整使用手册.md
+    ├── 支持矩阵.md
+    ├── 恢复演练记录模板.md
     └── 部署信息记录模板.md
 ```
 

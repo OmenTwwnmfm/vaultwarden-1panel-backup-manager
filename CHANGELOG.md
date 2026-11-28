@@ -1,5 +1,17 @@
 # 更新日志
 
+## v1.6.3 - 内部结构重构，功能与配置格式不变
+
+- 重构：`scripts/vw-manager.sh` 从约 1945 行拆成约 240 行的入口和 7 个模块：`manager-ui.sh`、`manager-config.sh`、`manager-github.sh`、`manager-backup.sh`、`manager-restore.sh`、`manager-systemd.sh`、`manager-ops.sh`。函数先原样搬移，再单独提交调整；菜单编号、交互、备份 / 恢复行为、命令 `vbm` 和配置文件格式都没有变化。
+- 安全：入口通过 `vbm_source_trusted` 加载模块。模块必须是普通文件，不能是符号链接，并且必须由 root 所有、不可被组或其他用户写入，否则管理器拒绝启动。
+- 安装：菜单 `[22]` 会把 7 个模块和 `vw-maintenance.sh` 一起安装到 `/usr/local/libexec`，安装列表与入口加载的模块列表保持一致，并由 `test-module-manifest` 检查。
+- 重构：恢复流程中的清理和回滚函数原来嵌套在其他函数内部，现在改为顶层函数并显式传参，不再依赖外层局部变量。
+- 清理：代码、路径和文档中残留的旧项目名统一改为 `vaultwarden-backup-manager`；README 与手册的项目结构同步为实际文件。
+- 测试：测试脚本改为从入口和全部模块中提取函数；新增模块加载信任检查和安装列表的回归测试。
+- 实测：2026-11-28 在 Ubuntu 26.04.1 LTS、Vaultwarden 1.37.5（1Panel 目录结构，bind mount）上用拆分后的版本完成手动备份（online 快照、`quick_check`、tmpfs 解密校验）、`vbm drill` 隔离演练和 `vbm restore` 生产恢复（停机约 4.8 秒，恢复后数据计数一致）；还验证了 root 外属主、可写权限、符号链接模块会被拒绝加载。详见 [支持矩阵](docs/支持矩阵.md)。
+
+升级须知：`git pull` 或菜单 `[23]` 更新源码后，**必须再运行一次 `[22]`**，把新模块安装到 `/usr/local/libexec`。否则直接运行 `/usr/local/sbin/vw-manager.sh` 会因找不到模块而退出；`vbm` 和 `run.sh` 从源码目录启动，不受影响。
+
 ## v1.6.1 - 文档与 CI 修复
 
 - 文档：README、快速开始和完整使用手册统一使用 `vaultwarden-backup-manager` 仓库地址和推荐安装路径 `/opt/vaultwarden-backup-manager`；CI 徽章指向当前仓库；部署方式徽章改为 1Panel / Compose / Docker。
