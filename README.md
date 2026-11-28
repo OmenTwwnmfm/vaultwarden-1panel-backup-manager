@@ -30,6 +30,10 @@ Vaultwarden 将用户密码库保存在自己的服务器上，因此需要可�
 
 **当前版本：[`v1.6.5`](https://github.com/OmenTwwnmfm/vaultwarden-backup-manager/releases/tag/v1.6.5)。** 新增独立的恢复成功和失败通知，菜单 `[18]` 可用 Bot Token 和一次性私聊配对码自动获取 Telegram Chat ID。本版的真机复测结果及未覆盖场景见 [支持矩阵](docs/支持矩阵.md)，升级前请阅读 [更新日志](CHANGELOG.md)。
 
+## 主菜单预览
+
+![Vaultwarden Backup Manager v1.6.5 主菜单截图](docs/images/vbm-main-menu.png)
+
 ## 先跑起来（3 分钟）
 
 ```bash
