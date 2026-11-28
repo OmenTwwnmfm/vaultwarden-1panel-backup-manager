@@ -10,7 +10,7 @@
 ![Deploy](https://img.shields.io/badge/deploy-1Panel%20%7C%20Compose%20%7C%20Docker-1677ff)
 ![Encryption](https://img.shields.io/badge/encryption-age-16a34a)
 ![Scheduler](https://img.shields.io/badge/scheduler-systemd-6d28d9)
-![Version](https://img.shields.io/badge/version-1.6.4-blue)
+[![Version](https://img.shields.io/badge/version-1.6.4-blue)](https://github.com/OmenTwwnmfm/vaultwarden-backup-manager/releases/tag/v1.6.4)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Tests](https://github.com/OmenTwwnmfm/vaultwarden-backup-manager/actions/workflows/ci.yml/badge.svg)
 
@@ -27,6 +27,8 @@ Vaultwarden 将用户密码库保存在自己的服务器上，因此需要可�
 兄弟项目 [vaultwarden-1panel-hardening-manager](https://github.com/OmenTwwnmfm/vaultwarden-1panel-hardening-manager)（`vhm`）管「门锁不坏」：安全体检、SSH 双因素、Fail2Ban、防火墙和变更回滚；本项目管「数据不丢」。建议先用 vhm 加固，再用本项目备份。
 
 > **源码仓库与备份存储必须分离。** 本仓库仅放项目代码和文档。GitHub 备份目标须使用独立 Private 仓库，WebDAV 须使用专用目录。不要把数据库、附件、age 私钥、SSH 私钥、WebDAV 凭据、真实配置或其他秘密提交到源码仓库。
+
+**当前正式版：[`v1.6.4`](https://github.com/OmenTwwnmfm/vaultwarden-backup-manager/releases/tag/v1.6.4)。** 本版保持功能与配置格式不变，已通过 GitHub 私库备份与取回、HTTPS WebDAV、隔离演练及恢复失败回滚的真机一比一验证。实测条件见 [支持矩阵](docs/支持矩阵.md)，升级前请阅读 [更新日志](CHANGELOG.md)。
 
 ## 先跑起来（3 分钟）
 
