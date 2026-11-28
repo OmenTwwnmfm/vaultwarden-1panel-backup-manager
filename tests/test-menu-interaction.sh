@@ -6,7 +6,7 @@ TMP=$(mktemp -d)
 trap 'rm -rf -- "$TMP"' EXIT
 VW_TEST_REAL_PYTHON="$(command -v python || command -v python3)"
 
-sed -n '/^show_backup_locations() {/,/^}/p; /^choose_backup_name() {/,/^}/p; /^manage_backup_history() {/,/^}/p; /^manage_history() (/,/^)/p; /^render_main_menu() {/,/^}/p; /^main_menu() {/,/^}/p' "$ROOT/scripts/vw-manager.sh" > "$TMP/functions.sh"
+sed -n '/^show_backup_locations() {/,/^}/p; /^choose_backup_name() {/,/^}/p; /^manage_backup_history() {/,/^}/p; /^manage_history() (/,/^)/p; /^render_main_menu() {/,/^}/p; /^main_menu() {/,/^}/p' "$ROOT/scripts/vw-manager.sh" "$ROOT"/scripts/manager-*.sh > "$TMP/functions.sh"
 source "$TMP/functions.sh"
 
 STORAGE_TOOL=mock-storage-tool

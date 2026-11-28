@@ -15,7 +15,7 @@ PYTHON
 chmod +x "$TMP/bin/python3"
 PATH="$TMP/bin:$PATH"
 export PATH
-sed -n '/^choose_backup_name() {/,/^}/p; /^select_source_archive() {/,/^}/p' "$ROOT/scripts/vw-manager.sh" > "$TMP/functions.sh"
+sed -n '/^choose_backup_name() {/,/^}/p; /^select_source_archive() {/,/^}/p' "$ROOT/scripts/vw-manager.sh" "$ROOT"/scripts/manager-*.sh > "$TMP/functions.sh"
 read_default() { local prompt="$1" default="$2" value; read -r value || true; printf '%s' "${value:-$default}"; }
 err() { printf '%s\n' "$*" >&2; }
 source "$TMP/functions.sh"

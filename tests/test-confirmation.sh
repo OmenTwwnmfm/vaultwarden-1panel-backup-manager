@@ -4,7 +4,7 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP=$(mktemp)
 trap 'rm -f "$TMP"' EXIT
 # Extract just the confirmation function so this test does not start the menu.
-sed -n '/^confirm_yes_upper() {/,/^}/p' "$ROOT/scripts/vw-manager.sh" > "$TMP"
+sed -n '/^confirm_yes_upper() {/,/^}/p' "$ROOT/scripts/vw-manager.sh" "$ROOT"/scripts/manager-*.sh > "$TMP"
 # shellcheck disable=SC1090
 source "$TMP"
 for value in yes YES Yes yEs; do

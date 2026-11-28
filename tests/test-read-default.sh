@@ -14,7 +14,7 @@ chmod +x "$TMP/bin/flock"
 PATH="$TMP/bin:$PATH"
 export PATH
 
-sed -n '/^read_default() {/,/^}/p' "$ROOT/scripts/vw-manager.sh" > "$TMP/read-default.sh"
+sed -n '/^read_default() {/,/^}/p' "$ROOT/scripts/vw-manager.sh" "$ROOT"/scripts/manager-*.sh > "$TMP/read-default.sh"
 # shellcheck disable=SC1091
 source "$ROOT/scripts/vw-common.sh"
 # shellcheck disable=SC1090

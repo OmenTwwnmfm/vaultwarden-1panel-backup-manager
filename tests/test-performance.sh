@@ -56,7 +56,7 @@ for stage in container_stop sqlite_quick_check snapshot_tar_age container_start_
   }
 done
 for stage in restore_container_stop rollback_snapshot_encrypt_validate restore_container_start_command restore_health_check_wait; do
-  grep -q "vw_perf_stage_begin \"$stage\"" "$ROOT/scripts/vw-manager.sh" || {
+  grep -q "vw_perf_stage_begin \"$stage\"" "$ROOT/scripts/vw-manager.sh" "$ROOT"/scripts/manager-*.sh || {
     echo "FAIL: restore manager does not instrument $stage" >&2; exit 1;
   }
 done
