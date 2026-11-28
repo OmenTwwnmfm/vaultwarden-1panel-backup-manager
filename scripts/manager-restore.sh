@@ -94,50 +94,59 @@ local_backup_actions() {
   esac
 }
 
+cleanup_restore() {
+  local restore_rc=$?
+  local stopped_by_script="$1" was_running="$2" container="$3" data_change_started="$4" staging="$5" temp_root="$6"
+  if [[ "${stopped_by_script:-0}" == "1" && "${was_running:-0}" == "1" && -n "${container:-}" ]]; then
+    if [[ "${data_change_started:-0}" == "1" ]]; then
+      echo "严重提醒：恢复过程中断，数据目录可能处于恢复中间状态。为避免使用不完整数据，容器保持停止。" >&2
+      echo "使用原 age 私钥和回滚文件完成恢复前，不要在 1Panel 或 docker compose 中启动该容器。" >&2
+    else
+      vw_perf_stage_begin "cleanup_container_start_command"
+      if docker start "$container" >/dev/null 2>&1; then
+        stopped_by_script=0
+        vw_perf_stage_end success
+        vw_perf_stage_begin "cleanup_health_check_wait"
+        if vw_wait_healthy "$container" 120 2 2; then
+          vw_perf_stage_end aggregate
+          # shellcheck disable=SC2034 # 经运行结果文件跨文件传递，供状态汇总读取
+          SERVICE_RESTORED=true
+          vw_perf_downtime_end aggregate
+          echo "安全清理：Vaultwarden 已重新启动并通过主动健康探测：$container"
+        else
+          vw_perf_stage_end aggregate
+          vw_perf_downtime_end aggregate
+          echo "严重提醒：容器已启动，但未通过健康探测。请在 1Panel 或 docker compose 中检查：$container" >&2
+        fi
+      else
+        vw_perf_stage_end failed
+        vw_perf_downtime_end aggregate
+        echo "严重提醒：自动清理时无法启动 Vaultwarden。请在 1Panel 或 docker compose 中手动启动：$container" >&2
+      fi
+    fi
+  fi
+  vw_perf_downtime_end aggregate
+  [[ -n "${staging:-}" ]] && rm -rf -- "$staging"
+  [[ -n "${temp_root:-}" ]] && rm -rf -- "$temp_root"
+  if [[ "${VW_PERF_STARTED:-0}" == 1 && "${VW_PERF_FINISHED:-0}" != 1 ]]; then
+    if (( restore_rc == 0 )); then vw_perf_finish success; else vw_perf_finish failed; fi
+  fi
+  return 0
+}
+
+rollback_from_snapshot() {
+  local data_dir="$1" identity="$2" rollback_archive="$3"
+  find "$data_dir" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + || return 1
+  age -d -i "$identity" "$rollback_archive" | tar --numeric-owner --same-owner -xzpf - -C "$data_dir" || return 1
+  [[ -f "$data_dir/db.sqlite3" ]]
+}
+
 restore_from_github() (
   local source="${1:-choose}"
   # Run restore in a subshell so decrypted staging data is removed even if the
   # user interrupts the operation or an unexpected command fails.
   local temp_root="" staging="" container="" stopped_by_script=0 data_change_started=0
-  cleanup_restore() {
-    local restore_rc=$?
-    if [[ "${stopped_by_script:-0}" == "1" && "${was_running:-0}" == "1" && -n "${container:-}" ]]; then
-      if [[ "${data_change_started:-0}" == "1" ]]; then
-        echo "严重提醒：恢复过程中断，数据目录可能处于恢复中间状态。为避免使用不完整数据，容器保持停止。" >&2
-        echo "使用原 age 私钥和回滚文件完成恢复前，不要在 1Panel 或 docker compose 中启动该容器。" >&2
-      else
-        vw_perf_stage_begin "cleanup_container_start_command"
-        if docker start "$container" >/dev/null 2>&1; then
-          stopped_by_script=0
-          vw_perf_stage_end success
-          vw_perf_stage_begin "cleanup_health_check_wait"
-          if vw_wait_healthy "$container" 120 2 2; then
-            vw_perf_stage_end aggregate
-            # shellcheck disable=SC2034 # 经运行结果文件跨文件传递，供状态汇总读取
-            SERVICE_RESTORED=true
-            vw_perf_downtime_end aggregate
-            echo "安全清理：Vaultwarden 已重新启动并通过主动健康探测：$container"
-          else
-            vw_perf_stage_end aggregate
-            vw_perf_downtime_end aggregate
-            echo "严重提醒：容器已启动，但未通过健康探测。请在 1Panel 或 docker compose 中检查：$container" >&2
-          fi
-        else
-          vw_perf_stage_end failed
-          vw_perf_downtime_end aggregate
-          echo "严重提醒：自动清理时无法启动 Vaultwarden。请在 1Panel 或 docker compose 中手动启动：$container" >&2
-        fi
-      fi
-    fi
-    vw_perf_downtime_end aggregate
-    [[ -n "${staging:-}" ]] && rm -rf -- "$staging"
-    [[ -n "${temp_root:-}" ]] && rm -rf -- "$temp_root"
-    if [[ "${VW_PERF_STARTED:-0}" == 1 && "${VW_PERF_FINISHED:-0}" != 1 ]]; then
-      if (( restore_rc == 0 )); then vw_perf_finish success; else vw_perf_finish failed; fi
-    fi
-    return 0
-  }
-  trap cleanup_restore EXIT
+  trap 'cleanup_restore "${stopped_by_script:-0}" "${was_running:-0}" "${container:-}" "${data_change_started:-0}" "${staging:-}" "${temp_root:-}"' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
 
@@ -302,11 +311,6 @@ restore_from_github() (
 
   # Keep the Docker bind/named-volume mountpoint itself intact. Only replace its
   # contents, so Docker/1Panel continues mounting the same Source path.
-  rollback_from_snapshot() {
-    find "$data_dir" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + || return 1
-    age -d -i "$identity" "$rollback_archive" | tar --numeric-owner --same-owner -xzpf - -C "$data_dir" || return 1
-    [[ -f "$data_dir/db.sqlite3" ]]
-  }
 
   echo "正在再次确认容器已停止且 /data 身份未变化..."
   stop_rc=0
@@ -323,7 +327,7 @@ restore_from_github() (
   data_change_started=1
   if ! find "$data_dir" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; then
     err "清理原 /data 目录内容失败，正在回滚。"
-    if rollback_from_snapshot; then
+    if rollback_from_snapshot "$data_dir" "$identity" "$rollback_archive"; then
       rollback_ok=1
       data_change_started=0
       ok "原数据已从加密回滚快照恢复。"
@@ -338,7 +342,7 @@ restore_from_github() (
 
   if ! cp -a "$staging/data/." "$data_dir/" || [[ ! -f "$data_dir/db.sqlite3" ]]; then
     err "复制恢复数据失败，正在从加密的恢复前快照回滚。"
-    if rollback_from_snapshot; then
+    if rollback_from_snapshot "$data_dir" "$identity" "$rollback_archive"; then
       rollback_ok=1
       data_change_started=0
       ok "原数据已从加密回滚快照恢复。"
@@ -401,7 +405,7 @@ restore_from_github() (
       vw_perf_stage_end success
       data_change_started=1
       vw_perf_stage_begin "restore_rollback_previous_data"
-      if rollback_from_snapshot; then
+      if rollback_from_snapshot "$data_dir" "$identity" "$rollback_archive"; then
         vw_perf_stage_end success
         data_change_started=0
         vw_perf_stage_begin "restore_rollback_container_start"
@@ -460,16 +464,18 @@ restore_from_github() (
   pause
 )
 
+cleanup_verify() {
+  local temp_root="$1" staging_root="$2" staging="$3"
+  [[ -n "${temp_root:-}" ]] && rm -rf -- "$temp_root"
+  [[ -n "${staging_root:-}" ]] && rm -rf -- "$staging_root"
+  [[ -n "${staging:-}" ]] && rm -rf -- "$staging"
+  return 0
+}
+
 verify_github_backup() (
   local source="${1:-choose}"
   local temp_root="" staging_root="" identity="" identity_pub="" archive="" staging="" sqlite_result=""
-  cleanup_verify() {
-    [[ -n "${temp_root:-}" ]] && rm -rf -- "$temp_root"
-    [[ -n "${staging_root:-}" ]] && rm -rf -- "$staging_root"
-    [[ -n "${staging:-}" ]] && rm -rf -- "$staging"
-    return 0
-  }
-  trap cleanup_verify EXIT
+  trap 'cleanup_verify "${temp_root:-}" "${staging_root:-}" "${staging:-}"' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
   require_root
@@ -528,18 +534,20 @@ verify_github_backup() (
   pause
 )
 
+cleanup_rehearsal() {
+  local test_name="$1" temp_root="$2" staging_root="$3"
+  if [[ -n "${test_name:-}" ]] && docker inspect "$test_name" >/dev/null 2>&1; then
+    docker rm -f "$test_name" >/dev/null 2>&1 || true
+  fi
+  [[ -n "${temp_root:-}" ]] && rm -rf -- "$temp_root"
+  [[ -n "${staging_root:-}" ]] && rm -rf -- "$staging_root"
+  return 0
+}
+
 restore_rehearsal() (
   set -Eeuo pipefail
   local temp_root="" staging_root="" identity="" archive="" staging="" container="" image="" test_name="" state="" health=""
-  cleanup_rehearsal() {
-    if [[ -n "${test_name:-}" ]] && docker inspect "$test_name" >/dev/null 2>&1; then
-      docker rm -f "$test_name" >/dev/null 2>&1 || true
-    fi
-    [[ -n "${temp_root:-}" ]] && rm -rf -- "$temp_root"
-    [[ -n "${staging_root:-}" ]] && rm -rf -- "$staging_root"
-    return 0
-  }
-  trap cleanup_rehearsal EXIT
+  trap 'cleanup_rehearsal "${test_name:-}" "${temp_root:-}" "${staging_root:-}"' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
   require_root
