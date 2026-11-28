@@ -28,7 +28,7 @@ Vaultwarden 将用户密码库保存在自己的服务器上，因此需要可�
 
 > **源码仓库与备份存储必须分离。** 本仓库仅放项目代码和文档。GitHub 备份目标须使用独立 Private 仓库，WebDAV 须使用专用目录。不要把数据库、附件、age 私钥、SSH 私钥、WebDAV 凭据、真实配置或其他秘密提交到源码仓库。
 
-**当前版本：[`v1.6.5`](https://github.com/OmenTwwnmfm/vaultwarden-backup-manager/releases/tag/v1.6.5)。** 新增独立的恢复成功和失败通知，菜单 `[18]` 可用 Bot Token 和一次性私聊配对码自动获取 Telegram Chat ID。既有版本的真机记录见 [支持矩阵](docs/支持矩阵.md)，升级前请阅读 [更新日志](CHANGELOG.md)。
+**当前版本：[`v1.6.5`](https://github.com/OmenTwwnmfm/vaultwarden-backup-manager/releases/tag/v1.6.5)。** 新增独立的恢复成功和失败通知，菜单 `[18]` 可用 Bot Token 和一次性私聊配对码自动获取 Telegram Chat ID。本版的真机复测结果及未覆盖场景见 [支持矩阵](docs/支持矩阵.md)，升级前请阅读 [更新日志](CHANGELOG.md)。
 
 ## 先跑起来（3 分钟）
 
