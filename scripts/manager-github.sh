@@ -20,7 +20,7 @@ setup_github_ssh() {
   chmod 700 /root/.ssh "$(dirname -- "$key_path")"
   if [[ ! -f "$key_path" ]]; then
     warn "将生成一把专门访问此备份仓库的 SSH 密钥。"
-    if ! ssh-keygen -t ed25519 -C "vaultwarden-1panel-backup" -f "$key_path" -N ""; then err "SSH 密钥生成失败。"; return 1; fi
+    if ! ssh-keygen -t ed25519 -C "vaultwarden-backup-manager" -f "$key_path" -N ""; then err "SSH 密钥生成失败。"; return 1; fi
   fi
   chmod 600 "$key_path"
   pub_path="${key_path}.pub"

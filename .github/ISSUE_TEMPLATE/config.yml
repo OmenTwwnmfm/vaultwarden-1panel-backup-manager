@@ -1,5 +1,5 @@
 blank_issues_enabled: true
 contact_links:
   - name: 先看文档
-    url: https://github.com/OmenTwwnmfm/vaultwarden-1panel-backup-manager/tree/main/docs
+    url: https://github.com/OmenTwwnmfm/vaultwarden-backup-manager/tree/main/docs
     about: 快速开始、完整使用手册和部署模板都在 docs 目录，很多问题可以在里面找到答案。

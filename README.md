@@ -151,7 +151,7 @@ WebDAV 使用已有 age 公钥加密完整 `/data` 和部署清单。备份只�
 ## 项目结构
 
 ```text
-Vaultwarden_1Panel_GitHub_Project/
+vaultwarden-backup-manager/
 ├── README.md
 ├── CHANGELOG.md
 ├── LICENSE
