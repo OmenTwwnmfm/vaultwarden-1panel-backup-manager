@@ -10,7 +10,7 @@
 ![Deploy](https://img.shields.io/badge/deploy-1Panel%20%7C%20Compose%20%7C%20Docker-1677ff)
 ![Encryption](https://img.shields.io/badge/encryption-age-16a34a)
 ![Scheduler](https://img.shields.io/badge/scheduler-systemd-6d28d9)
-[![Version](https://img.shields.io/badge/version-1.6.4-blue)](https://github.com/OmenTwwnmfm/vaultwarden-backup-manager/releases/tag/v1.6.4)
+[![Version](https://img.shields.io/badge/version-1.6.5-blue)](https://github.com/OmenTwwnmfm/vaultwarden-backup-manager/releases/tag/v1.6.5)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Tests](https://github.com/OmenTwwnmfm/vaultwarden-backup-manager/actions/workflows/ci.yml/badge.svg)
 
@@ -28,7 +28,7 @@ Vaultwarden 将用户密码库保存在自己的服务器上，因此需要可�
 
 > **源码仓库与备份存储必须分离。** 本仓库仅放项目代码和文档。GitHub 备份目标须使用独立 Private 仓库，WebDAV 须使用专用目录。不要把数据库、附件、age 私钥、SSH 私钥、WebDAV 凭据、真实配置或其他秘密提交到源码仓库。
 
-**当前正式版：[`v1.6.4`](https://github.com/OmenTwwnmfm/vaultwarden-backup-manager/releases/tag/v1.6.4)。** 本版保持功能与配置格式不变，已通过 GitHub 私库备份与取回、HTTPS WebDAV、隔离演练及恢复失败回滚的真机一比一验证。实测条件见 [支持矩阵](docs/支持矩阵.md)，升级前请阅读 [更新日志](CHANGELOG.md)。
+**当前版本：[`v1.6.5`](https://github.com/OmenTwwnmfm/vaultwarden-backup-manager/releases/tag/v1.6.5)。** 新增独立的恢复成功和失败通知，菜单 `[18]` 可用 Bot Token 和一次性私聊配对码自动获取 Telegram Chat ID。既有版本的真机记录见 [支持矩阵](docs/支持矩阵.md)，升级前请阅读 [更新日志](CHANGELOG.md)。
 
 ## 先跑起来（3 分钟）
 
@@ -117,7 +117,7 @@ WebDAV 使用已有 age 公钥加密完整 `/data` 和部署清单。备份只�
 
 - **systemd timer**：由 Ubuntu / Debian 系统本身调度，支持每天、每周日或每月 1 日运行；默认每天按 VPS 本地时区 05:20 备份。
 - **错过任务补执行**：使用 `Persistent=true`，机器关机错过计划后可在下次启动时补执行。
-- **成功/失败通知**：支持 Telegram、ntfy 或通用 Webhook；通知发送失败不会改变备份结果。
+- **成功/失败通知**：备份和实际恢复各有独立开关，支持 Telegram、ntfy 或通用 Webhook；通知发送失败不改变任务结果。
 - **日志轮转**：安装 logrotate 配置，避免备份日志无限增长。
 - **升级前保护**：在更新 Vaultwarden（1Panel 或 docker compose pull）前，先自动执行一份完整备份并核验当前目标远端数据。
 - **诊断报告**：生成脱敏的系统、Docker、数据路径、磁盘、定时器和备份日志报告。
@@ -289,11 +289,11 @@ tail -n 100 /var/log/vaultwarden-backup.log
 
 菜单 `[18]` 支持 Telegram、ntfy 和 Webhook。
 
-- **Telegram**：Bot Token + Chat ID。
+- **Telegram**：用 [@BotFather](https://t.me/BotFather) 创建专用机器人，在 `[18]` 输入 Bot Token，再把屏幕显示的一次性配对码发给机器人私聊，Chat ID 自动获取。已有配对可直接回车保留。
 - **ntfy**：Topic URL，可选 Access Token。
 - **Webhook**：向指定 URL 发送 JSON 事件。
 
-通知配置保存在 root 专用的 `/etc/vaultwarden-backup.conf`（权限 600）。成功通知和失败通知可以分别开关。通知网络失败不会把已经成功的备份改判为失败。
+通知配置保存在 root 专用的 `/etc/vaultwarden-backup.conf`（权限 600）。升级保留已有通知配置，新增的恢复通知默认关闭。保存时会发送一条测试消息，无需重跑备份或实际恢复。
 
 ## 备份完整性与恢复演练
 

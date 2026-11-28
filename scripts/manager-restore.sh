@@ -50,16 +50,16 @@ select_source_archive() {
       [[ -f "$key" ]] || { err "SSH 私钥不存在：$key"; return 1; }
       clone_for_restore "$GITHUB_REPO" "$GITHUB_BRANCH" "$repo_tmp" "$key" || { err "克隆 GitHub 备份仓库失败。"; return 1; }
       python3 "$STORAGE_TOOL" local-list "$repo_tmp" "$list_option" > "$listing" || return 1
-      choose_backup_name "$listing" || return 1
+      choose_backup_name "$listing" || return $?
       SELECTED_ARCHIVE="$repo_tmp/$SELECTED_NAME"
       ;;
     local|local-fixed)
       local source_listing="$temp_root/local-archives.txt"
       python3 "$STORAGE_TOOL" local-list "$BACKUP_DIR" "$list_option" > "$source_listing" || return 1
       if [[ "$source" == local-fixed ]]; then
-        choose_backup_name "$source_listing" "本地备份编号（0 取消）" || return 1
+        choose_backup_name "$source_listing" "本地备份编号（0 取消）" || return $?
       else
-        choose_backup_name "$source_listing" || return 1
+        choose_backup_name "$source_listing" || return $?
       fi
       SELECTED_ARCHIVE="$BACKUP_DIR/$SELECTED_NAME"
       ;;
@@ -70,7 +70,7 @@ select_source_archive() {
       else
         python3 "$STORAGE_TOOL" list > "$listing" || return 1
       fi
-      choose_backup_name "$listing" || return 1
+      choose_backup_name "$listing" || return $?
       if [[ "$kind" == manifest ]]; then
         python3 "$STORAGE_TOOL" download-manifest "${SELECTED_NAME%.manifest.json.age}.tar.gz.age" "$repo_tmp" || return 1
       else
@@ -95,8 +95,7 @@ local_backup_actions() {
 }
 
 cleanup_restore() {
-  local restore_rc=$?
-  local stopped_by_script="$1" was_running="$2" container="$3" data_change_started="$4" staging="$5" temp_root="$6"
+  local restore_rc="$1" stopped_by_script="$2" was_running="$3" container="$4" data_change_started="$5" staging="$6" temp_root="$7"
   if [[ "${stopped_by_script:-0}" == "1" && "${was_running:-0}" == "1" && -n "${container:-}" ]]; then
     if [[ "${data_change_started:-0}" == "1" ]]; then
       echo "严重提醒：恢复过程中断，数据目录可能处于恢复中间状态。为避免使用不完整数据，容器保持停止。" >&2
@@ -134,6 +133,19 @@ cleanup_restore() {
   return 0
 }
 
+finish_restore() {
+  local restore_rc="$1" restored_state="$2" archive="$3" container="$4"
+  local stopped_by_script="$5" was_running="$6" data_change_started="$7" staging="$8" temp_root="$9"
+  cleanup_restore "$restore_rc" "$stopped_by_script" "$was_running" "$container" "$data_change_started" "$staging" "$temp_root"
+  exec 8>&-
+  if (( restore_rc != 0 )); then
+    vw_notify failure "Vaultwarden 恢复失败（退出码 $restore_rc）。请查看恢复终端输出，确认回滚及容器状态。" false restore || true
+  elif [[ -n "$restored_state" ]]; then
+    vw_notify success "Vaultwarden 恢复成功：${archive##*/} → $container（$restored_state）。" false restore || true
+    pause
+  fi
+}
+
 rollback_from_snapshot() {
   local data_dir="$1" identity="$2" rollback_archive="$3"
   find "$data_dir" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + || return 1
@@ -145,8 +157,8 @@ restore_from_github() (
   local source="${1:-choose}"
   # Run restore in a subshell so decrypted staging data is removed even if the
   # user interrupts the operation or an unexpected command fails.
-  local temp_root="" staging="" container="" stopped_by_script=0 data_change_started=0
-  trap 'cleanup_restore "${stopped_by_script:-0}" "${was_running:-0}" "${container:-}" "${data_change_started:-0}" "${staging:-}" "${temp_root:-}"' EXIT
+  local temp_root="" staging="" container="" stopped_by_script=0 data_change_started=0 restored_state="" selection_rc=0
+  trap 'finish_restore "$?" "${restored_state:-}" "${archive:-}" "${container:-}" "${stopped_by_script:-0}" "${was_running:-0}" "${data_change_started:-0}" "${staging:-}" "${temp_root:-}"' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
 
@@ -169,7 +181,8 @@ restore_from_github() (
   local acquisition_stage="$source"
   [[ "$source" == choose ]] && acquisition_stage=backup
   vw_perf_stage_begin "${acquisition_stage}_acquire_backup"
-  select_source_archive "$source" "$temp_root" || return 1
+  select_source_archive "$source" "$temp_root" || selection_rc=$?
+  if (( selection_rc == 2 )); then return 0; elif (( selection_rc != 0 )); then return 1; fi
   archive="$SELECTED_ARCHIVE"
   vw_perf_stage_end success
   if [[ ! -f "$archive.sha256" ]]; then err "找不到对应 SHA256 文件：$archive.sha256"; rm -rf -- "$temp_root"; return 1; fi
@@ -192,7 +205,8 @@ restore_from_github() (
   staging="$temp_root/staging"
   if [[ -e "$staging" ]]; then err "暂存目录已存在：$staging"; rm -rf -- "$temp_root"; return 1; fi
   vw_perf_stage_begin "restore_decrypt_validate"
-  accept_backup_signature "$archive" || return 1
+  accept_backup_signature "$archive" || selection_rc=$?
+  if (( selection_rc == 2 )); then return 0; elif (( selection_rc != 0 )); then return 1; fi
   if ! VW_ALLOW_UNSIGNED="$ALLOW_UNSIGNED" VW_MIN_FREE_MB="${MIN_FREE_MB:-512}" VW_STORAGE_TOOL="$STORAGE_TOOL" bash "$RESTORE_SCRIPT" "$archive" "$identity" "$staging"; then
     err "校验或解密失败。原 Vaultwarden 数据尚未修改。"
     rm -rf -- "$staging" "$temp_root"
@@ -381,6 +395,7 @@ restore_from_github() (
         vw_perf_stage_end aggregate
         vw_perf_downtime_end aggregate
         ok "恢复后的 Vaultwarden 已通过连续主动健康探测。"
+        restored_state="服务健康检查通过"
       else
         vw_perf_stage_end aggregate
         err "恢复后的实例未通过主动健康探测，准备回滚到恢复前数据。"
@@ -452,6 +467,7 @@ restore_from_github() (
     fi
   else
     stopped_by_script=0
+    restored_state="按要求保持容器停止，未执行健康检查"
     vw_perf_stage_begin "restore_container_start_command"
     vw_perf_stage_end skipped
     vw_perf_stage_begin "restore_health_check_wait"
@@ -459,9 +475,9 @@ restore_from_github() (
     warn "已按你的选择保持容器停止。稍后可在 1Panel → 已安装应用中，或用 docker start / docker compose start 手动启动。"
   fi
   warn "请登录网页测试原用户、附件、TOTP 与同步。确认一切正常之前，不要删除原数据加密回滚快照：$rollback_archive"
-  ok "恢复暂存目录将在退出菜单时自动清理。"
+  ok "恢复暂存目录将在本次恢复结束时自动清理。"
   vw_perf_finish success
-  pause
+  exit 0
 )
 
 cleanup_verify() {

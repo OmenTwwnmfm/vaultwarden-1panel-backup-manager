@@ -5,7 +5,7 @@
 
 configure_notifications() {
   load_config || return 1
-  echo "通知支持：none（关闭）、telegram、ntfy、webhook。通知失败不会影响备份结果。"
+  echo "通知支持：none（关闭）、telegram、ntfy、webhook。通知失败不会影响备份或恢复结果。"
   local method
   method=$(read_default "通知方式" "${NOTIFY_METHOD:-none}")
   method="${method,,}"
@@ -16,8 +16,18 @@ configure_notifications() {
   NOTIFY_METHOD="$method"
   case "$method" in
     telegram)
-      read -r -p "Telegram Bot Token（输入内容不会回显）: " -s TELEGRAM_BOT_TOKEN; echo
-      read -r -p "Telegram Chat ID: " TELEGRAM_CHAT_ID
+      local token token_prompt="Telegram Bot Token（输入内容不会回显）"
+      if [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then token_prompt+="，直接回车保留当前配对"; fi
+      if ! read -r -s -p "$token_prompt: " token; then echo; return 1; fi
+      echo
+      if [[ -n "$token" ]]; then
+        TELEGRAM_CHAT_ID=$(printf '%s\n' "$token" | vw_telegram_chat_id) || return 1
+        TELEGRAM_BOT_TOKEN="$token"
+        ok "已识别 Telegram 私聊 Chat ID。"
+      elif [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
+        err "首次配置 Telegram 必须输入 Bot Token。"
+        return 1
+      fi
       ;;
     ntfy)
       NTFY_URL=$(read_default "ntfy 完整 Topic URL（例如 https://ntfy.sh/your-private-topic）" "${NTFY_URL:-}")
@@ -34,9 +44,16 @@ configure_notifications() {
   esac
   NOTIFY_ON_SUCCESS=$(read_default "是否发送备份成功通知 true/false" "${NOTIFY_ON_SUCCESS:-true}")
   NOTIFY_ON_FAILURE=$(read_default "是否发送备份失败通知 true/false" "${NOTIFY_ON_FAILURE:-true}")
+  NOTIFY_RESTORE_ON_SUCCESS=$(read_default "是否发送恢复成功通知 true/false" "${NOTIFY_RESTORE_ON_SUCCESS:-false}")
+  NOTIFY_RESTORE_ON_FAILURE=$(read_default "是否发送恢复失败通知 true/false" "${NOTIFY_RESTORE_ON_FAILURE:-false}")
+  local setting
+  for setting in "$NOTIFY_ON_SUCCESS" "$NOTIFY_ON_FAILURE" "$NOTIFY_RESTORE_ON_SUCCESS" "$NOTIFY_RESTORE_ON_FAILURE"; do
+    case "${setting,,}" in true|false|1|0|yes|no) ;; *) err "通知开关必须使用 true 或 false。"; return 1 ;; esac
+  done
   vw_update_config_values "NOTIFY_METHOD=$NOTIFY_METHOD" "TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}" "TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}" \
     "NTFY_URL=${NTFY_URL:-}" "NTFY_TOKEN=${NTFY_TOKEN:-}" "WEBHOOK_URL=${WEBHOOK_URL:-}" \
-    "NOTIFY_ON_SUCCESS=$NOTIFY_ON_SUCCESS" "NOTIFY_ON_FAILURE=$NOTIFY_ON_FAILURE" || { err "保存通知配置失败。"; return 1; }
+    "NOTIFY_ON_SUCCESS=$NOTIFY_ON_SUCCESS" "NOTIFY_ON_FAILURE=$NOTIFY_ON_FAILURE" \
+    "NOTIFY_RESTORE_ON_SUCCESS=$NOTIFY_RESTORE_ON_SUCCESS" "NOTIFY_RESTORE_ON_FAILURE=$NOTIFY_RESTORE_ON_FAILURE" || { err "保存通知配置失败。"; return 1; }
   ok "通知配置已保存到权限为 600 的配置文件。"
   if [[ "$NOTIFY_METHOD" != none ]]; then
     if vw_notify success "Vaultwarden Backup Manager notification test from $(hostname)." true; then

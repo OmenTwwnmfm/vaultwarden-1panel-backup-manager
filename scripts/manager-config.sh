@@ -122,6 +122,8 @@ load_config() {
   WEBHOOK_URL="${WEBHOOK_URL:-}"
   NOTIFY_ON_SUCCESS="${NOTIFY_ON_SUCCESS:-true}"
   NOTIFY_ON_FAILURE="${NOTIFY_ON_FAILURE:-true}"
+  NOTIFY_RESTORE_ON_SUCCESS="${NOTIFY_RESTORE_ON_SUCCESS:-false}"
+  NOTIFY_RESTORE_ON_FAILURE="${NOTIFY_RESTORE_ON_FAILURE:-false}"
   BACKUP_TARGET="${PRIMARY_TARGET:-${BACKUP_TARGET:-github}}"
   SECONDARY_TARGET="${SECONDARY_TARGET:-none}"
   SNAPSHOT_MODE="${SNAPSHOT_MODE:-stop}"
@@ -164,6 +166,8 @@ write_config() {
     printf 'WEBHOOK_URL=%q\n' "${WEBHOOK_URL:-}"
     printf 'NOTIFY_ON_SUCCESS=%q\n' "${NOTIFY_ON_SUCCESS:-true}"
     printf 'NOTIFY_ON_FAILURE=%q\n' "${NOTIFY_ON_FAILURE:-true}"
+    printf 'NOTIFY_RESTORE_ON_SUCCESS=%q\n' "${NOTIFY_RESTORE_ON_SUCCESS:-false}"
+    printf 'NOTIFY_RESTORE_ON_FAILURE=%q\n' "${NOTIFY_RESTORE_ON_FAILURE:-false}"
     printf 'BACKUP_TARGET=%q\n' "${BACKUP_TARGET:-github}"
     local setting
     for setting in PRIMARY_TARGET SECONDARY_TARGET SNAPSHOT_MODE WEBDAV_RETENTION_DAYS WEBDAV_MIN_KEEP ALERT_MAX_BACKUP_AGE_HOURS ALERT_MAX_DRILL_AGE_DAYS CONTAINER_MATCH; do
@@ -326,7 +330,7 @@ accept_backup_signature() {
     3)
       warn "此备份没有签名。只有确认来源可信的旧备份才能继续。"
       response=$(read_default "输入 UNSIGNED 继续" "")
-      [[ "$response" == UNSIGNED ]] || return 1
+      [[ "$response" == UNSIGNED ]] || return 2
       ALLOW_UNSIGNED=1
       ;;
     *) return 1 ;;

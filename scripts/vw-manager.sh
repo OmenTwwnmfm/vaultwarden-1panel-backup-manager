@@ -5,7 +5,7 @@ set -Eeuo pipefail
 umask 077
 unset VW_CONFIG_FILE VW_LOG_FILE VW_LOCK_FILE VW_STATE_DIR VW_COMMON_LIB VW_MANIFEST_TOOL VW_ARCHIVE_CHECK_TOOL VW_MIN_FREE_MB VW_PERF_FILE VW_PERF_LOCK_FILE VW_DIAG_REPORT_DIR
 
-VERSION="1.6.4"
+VERSION="1.6.5"
 CONFIG_FILE="/etc/vaultwarden-backup.conf"
 BACKUP_SCRIPT="/usr/local/sbin/vw-backup.sh"
 RESTORE_SCRIPT="/usr/local/sbin/vw-restore-prepare.sh"

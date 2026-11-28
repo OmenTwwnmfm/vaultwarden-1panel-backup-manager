@@ -132,7 +132,7 @@ vw_find_target() {
   export VW_DETECTED_CONTAINER VW_DETECTED_IMAGE VW_DETECTED_STATUS VW_DETECTED_DATA_DIR VW_DETECTED_HEALTH
 }
 
-VW_CONFIG_KEYS=(CONTAINER DATA_DIR AGE_RECIPIENT GITHUB_REPO GITHUB_BRANCH GITHUB_SSH_KEY BACKUP_DIR REPO_DIR RETENTION_DAYS MAX_FILE_MIB AGE_IDENTITY_DEFAULT SYSTEMD_TIME BACKUP_FREQUENCY MIN_FREE_MB GIT_PUSH_RETRIES GIT_RETRY_DELAY NOTIFY_METHOD TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID NTFY_URL NTFY_TOKEN WEBHOOK_URL NOTIFY_ON_SUCCESS NOTIFY_ON_FAILURE BACKUP_TARGET PRIMARY_TARGET SECONDARY_TARGET SNAPSHOT_MODE WEBDAV_RETENTION_DAYS WEBDAV_MIN_KEEP ALERT_MAX_BACKUP_AGE_HOURS ALERT_MAX_DRILL_AGE_DAYS CONTAINER_MATCH)
+VW_CONFIG_KEYS=(CONTAINER DATA_DIR AGE_RECIPIENT GITHUB_REPO GITHUB_BRANCH GITHUB_SSH_KEY BACKUP_DIR REPO_DIR RETENTION_DAYS MAX_FILE_MIB AGE_IDENTITY_DEFAULT SYSTEMD_TIME BACKUP_FREQUENCY MIN_FREE_MB GIT_PUSH_RETRIES GIT_RETRY_DELAY NOTIFY_METHOD TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID NTFY_URL NTFY_TOKEN WEBHOOK_URL NOTIFY_ON_SUCCESS NOTIFY_ON_FAILURE NOTIFY_RESTORE_ON_SUCCESS NOTIFY_RESTORE_ON_FAILURE BACKUP_TARGET PRIMARY_TARGET SECONDARY_TARGET SNAPSHOT_MODE WEBDAV_RETENTION_DAYS WEBDAV_MIN_KEEP ALERT_MAX_BACKUP_AGE_HOURS ALERT_MAX_DRILL_AGE_DAYS CONTAINER_MATCH)
 
 # Write every known setting from the current shell variables. Callers must
 # hold the config lock; use vw_save_config or vw_update_config_values.
@@ -432,17 +432,78 @@ vw_format_bytes() {
   awk -v n="$bytes" 'BEGIN { if (n >= 1073741824) printf "%.2f GiB (%s bytes)", n/1073741824, n; else if (n >= 1048576) printf "%.2f MiB (%s bytes)", n/1048576, n; else if (n >= 1024) printf "%.2f KiB (%.2f MiB; %s bytes)", n/1024, n/1048576, n; else printf "%s bytes (%.2f KiB)", n, n/1024; }'
 }
 
+vw_telegram_chat_id() {
+  python3 -c '
+import json, re, secrets, sys, time
+import urllib.error, urllib.parse, urllib.request
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+def report(message):
+    print(message, file=sys.stderr, flush=True)
+
+token = sys.stdin.readline().strip()
+if not re.fullmatch(r"[0-9]+:[A-Za-z0-9_-]+", token):
+    report("Telegram Bot Token 格式无效。")
+    sys.exit(1)
+opener = urllib.request.build_opener(NoRedirect())
+url = "https://api.telegram.org/bot" + token + "/getUpdates"
+challenge = "vbm-" + secrets.token_hex(8)
+report("请在 Telegram 打开机器人私聊，点击 Start 后发送配对码：" + challenge)
+report("正在等待配对消息（最多约 120 秒），无需手动输入 Chat ID。")
+deadline = time.monotonic() + 120
+while time.monotonic() < deadline:
+    try:
+        body = urllib.parse.urlencode({"allowed_updates": "[\"message\"]", "limit": 100}).encode()
+        with opener.open(url, data=body, timeout=8) as response:
+            result = json.loads(response.read(2 * 1024 * 1024))
+        if result.get("ok") is not True or not isinstance(result.get("result"), list):
+            raise ValueError
+        matches = set()
+        for update in result["result"]:
+            message = update.get("message", {})
+            chat = message.get("chat", {})
+            chat_id = chat.get("id")
+            if message.get("text") == challenge and chat.get("type") == "private" and type(chat_id) is int and chat_id > 0:
+                matches.add(chat_id)
+        if len(matches) == 1:
+            print(matches.pop())
+            sys.exit(0)
+        if matches:
+            report("配对码出现在多个私聊中，请重新配对。")
+            sys.exit(1)
+        if len(result["result"]) == 100:
+            report("机器人有过多未处理消息，请改用专用机器人后重试。")
+            sys.exit(1)
+    except urllib.error.HTTPError as error:
+        report(f"Telegram 查询失败（HTTP {error.code}）。")
+        if error.code in (401, 404):
+            report("请核对 Bot Token。")
+        elif error.code == 409:
+            report("该机器人正在使用 Webhook 或其他轮询程序，请使用专用机器人。")
+        sys.exit(1)
+    except (OSError, ValueError, AttributeError, TypeError) as error:
+        report(f"Telegram 查询失败（{type(error).__name__}），请检查服务器到 Telegram 的 HTTPS 连通性。")
+        sys.exit(1)
+    time.sleep(3)
+report("Telegram 配对超时。请重新进入菜单，并在机器人私聊发送新配对码。")
+sys.exit(1)
+'
+}
+
 vw_notify() {
-  local event="${1:-info}" message="${2:-Vaultwarden backup event}" force="${3:-false}" config="${CONFIG_FILE:-/etc/vaultwarden-backup.conf}"
+  local event="${1:-info}" message="${2:-Vaultwarden backup event}" force="${3:-false}" operation="${4:-backup}" config="${CONFIG_FILE:-/etc/vaultwarden-backup.conf}"
   [[ -f "$config" ]] || return 0
   vw_require_secure_config "$config" || return 1
   # Backup/restore callers deliberately ignore this status; menu tests do not.
-  python3 - "$config" "$event" "$message" "$force" <<'PY'
+  python3 - "$config" "$event" "$message" "$force" "$operation" <<'PY'
 import os, sys, urllib.request, urllib.parse, json
-cfg_path, event, message, force = sys.argv[1:5]
+cfg_path, event, message, force, operation = sys.argv[1:6]
 # The config is root-owned mode 0600 and contains shell-escaped assignments.
 # Source it in a child bash and export only notification variables.
-keys = ["NOTIFY_METHOD", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "NTFY_URL", "NTFY_TOKEN", "WEBHOOK_URL", "NOTIFY_ON_SUCCESS", "NOTIFY_ON_FAILURE"]
+keys = ["NOTIFY_METHOD", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "NTFY_URL", "NTFY_TOKEN", "WEBHOOK_URL", "NOTIFY_ON_SUCCESS", "NOTIFY_ON_FAILURE", "NOTIFY_RESTORE_ON_SUCCESS", "NOTIFY_RESTORE_ON_FAILURE"]
 cmd = 'set -a; . "$1"; for k in ' + ' '.join(keys) + '; do printf "%s=%s\\n" "$k" "${!k-}"; done'
 import subprocess
 p = subprocess.run(["bash", "-c", cmd, "notify-env", cfg_path], capture_output=True, text=True)
@@ -458,9 +519,11 @@ for line in p.stdout.splitlines():
 method = (env.get("NOTIFY_METHOD") or "none").lower()
 if method in ("", "none", "off"):
     sys.exit(0)
-if force.lower() not in ("1", "true", "yes") and event == "success" and (env.get("NOTIFY_ON_SUCCESS") or "true").lower() not in ("1", "true", "yes"):
-    sys.exit(0)
-if force.lower() not in ("1", "true", "yes") and event != "success" and (env.get("NOTIFY_ON_FAILURE") or "true").lower() not in ("1", "true", "yes"):
+enabled_values = ("1", "true", "yes")
+suffix = "SUCCESS" if event == "success" else "FAILURE"
+setting = "NOTIFY_RESTORE_ON_" + suffix if operation == "restore" else "NOTIFY_ON_" + suffix
+default = "false" if operation == "restore" else "true"
+if force.lower() not in enabled_values and (env.get(setting) or default).lower() not in enabled_values:
     sys.exit(0)
 def require_https(url):
     parsed = urllib.parse.urlsplit(url)
@@ -480,14 +543,15 @@ try:
         url, token = env.get("NTFY_URL", ""), env.get("NTFY_TOKEN", "")
         if not url: raise RuntimeError("ntfy URL not configured")
         require_https(url)
-        headers = {"Title": "Vaultwarden Backup", "Priority": "high" if event != "success" else "default"}
+        headers = {"Title": "Vaultwarden Restore" if operation == "restore" else "Vaultwarden Backup", "Priority": "high" if event != "success" else "default"}
         if token: headers["Authorization"] = "Bearer " + token
         req = urllib.request.Request(url, data=message.encode(), headers=headers, method="POST")
     elif method == "webhook":
         url = env.get("WEBHOOK_URL", "")
         if not url: raise RuntimeError("Webhook URL not configured")
         require_https(url)
-        data = json.dumps({"project":"Vaultwarden Backup Manager", "event":event, "message":message}, ensure_ascii=False).encode()
+        webhook_event = "restore_" + event if operation == "restore" else event
+        data = json.dumps({"project":"Vaultwarden Backup Manager", "event":webhook_event, "message":message}, ensure_ascii=False).encode()
         req = urllib.request.Request(url, data=data, headers={"Content-Type":"application/json"}, method="POST")
     else:
         raise RuntimeError("Unknown notification method: " + method)
@@ -495,7 +559,7 @@ try:
         if response.status < 200 or response.status >= 300: raise RuntimeError("HTTP status " + str(response.status))
 except Exception as exc:
     detail = str(exc) if isinstance(exc, RuntimeError) else ""
-    print("[WARN] Notification failed (backup status unchanged):", type(exc).__name__, detail, file=sys.stderr)
+    print(f"[WARN] Notification failed ({operation} status unchanged):", type(exc).__name__, detail, file=sys.stderr)
     sys.exit(1)
 PY
 }

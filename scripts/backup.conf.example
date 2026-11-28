@@ -39,6 +39,8 @@ NTFY_TOKEN=""
 WEBHOOK_URL=""
 NOTIFY_ON_SUCCESS="true"
 NOTIFY_ON_FAILURE="true"
+NOTIFY_RESTORE_ON_SUCCESS="false"
+NOTIFY_RESTORE_ON_FAILURE="false"
 
 # WebDAV credentials are configured separately by menu 12 in /etc/vaultwarden-webdav.json.
 # BACKUP_TARGET accepts github or webdav for scheduled backups.

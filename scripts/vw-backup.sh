@@ -122,6 +122,14 @@ vw_require_secure_config "$CONFIG_FILE" || exit 1
 # shellcheck disable=SC1090
 source "$CONFIG_FILE"
 
+notify_preflight_failure() {
+  local status=$?
+  if (( status != 0 )); then
+    vw_notify failure "Vaultwarden backup FAILED on $(hostname): preflight failed (exit $status). See /var/log/vaultwarden-backup.log." || true
+  fi
+}
+trap notify_preflight_failure EXIT
+
 # Backward-compatible defaults for configs created by older releases.
 SYSTEMD_TIME="${SYSTEMD_TIME:-*-*-* 05:20:00}"
 BACKUP_FREQUENCY="${BACKUP_FREQUENCY:-daily}"
