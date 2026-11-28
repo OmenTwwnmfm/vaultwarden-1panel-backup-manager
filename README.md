@@ -24,7 +24,7 @@ Vaultwarden 将用户密码库保存在自己的服务器上，因此需要可�
 
 项目重点不是再部署一套 Vaultwarden，而是保护已经在运行的现有实例。1Panel 或你自己的 compose 文件继续负责应用安装、Docker、域名、HTTPS 证书和反向代理；本项目负责数据备份、校验、通知、历史管理和灾难恢复。
 
-兄弟项目 [vaultwarden-1panel-hardening-manager](https://github.com/OmenTwwnmfm/vaultwarden-1panel-hardening-manager)（`vhm`）管「门锁不坏」：安全体检、SSH 双因素、Fail2Ban、防火墙和变更回滚；本项目管「数据不丢」。建议先用 vhm 加固，再用本项目备份。
+兄弟项目 [vaultwarden-hardening-manager](https://github.com/OmenTwwnmfm/vaultwarden-hardening-manager)（`vhm`）管「门锁不坏」：安全体检、SSH 双因素、Fail2Ban、防火墙和变更回滚；本项目管「数据不丢」。建议先用 vhm 加固，再用本项目备份。
 
 > **源码仓库与备份存储必须分离。** 本仓库仅放项目代码和文档。GitHub 备份目标须使用独立 Private 仓库，WebDAV 须使用专用目录。不要把数据库、附件、age 私钥、SSH 私钥、WebDAV 凭据、真实配置或其他秘密提交到源码仓库。
 
