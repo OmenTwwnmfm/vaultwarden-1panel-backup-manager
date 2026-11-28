@@ -1,5 +1,7 @@
 # 更新日志
 
+## v1.6.4 - 2026-11-28
+
 ## v1.6.3 - 内部结构重构，功能与配置格式不变
 
 - 重构：`scripts/vw-manager.sh` 从约 1945 行拆成约 240 行的入口和 7 个模块：`manager-ui.sh`、`manager-config.sh`、`manager-github.sh`、`manager-backup.sh`、`manager-restore.sh`、`manager-systemd.sh`、`manager-ops.sh`。函数先原样搬移，再单独提交调整；菜单编号、交互、备份 / 恢复行为、命令 `vbm` 和配置文件格式都没有变化。
